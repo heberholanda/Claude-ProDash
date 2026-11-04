@@ -8,7 +8,7 @@ const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
 const HIST = 24
 
 const logs = atom({ plugin: 'prodash', key: 'logs' } as const, [] as LogLine[], { shape: 'logs-1' })
-const forks = atom({ plugin: 'prodash', key: 'forks' } as const, [] as Fork[], { shape: 'forks-1' })
+const forks = atom({ plugin: 'prodash', key: 'forks' } as const, [] as Fork[], { shape: 'forks-2' })
 const sys = atom({ plugin: 'prodash', key: 'sys' } as const, { hist: [] } as Sys, { shape: 'sys-1' })
 const usage = atom({ plugin: 'prodash', key: 'usage' } as const, { startedAt: 0, tokens: 0, ctxHist: [] } as Usage, { shape: 'usage-1' })
 const mode = atom({ plugin: 'prodash', key: 'mode' } as const, 'main' as Mode)
@@ -37,6 +37,11 @@ const clock = (ms: number) => {
   const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60
   const p = (n: number) => String(n).padStart(2, '0')
   return hh ? `${hh}:${p(mm)}:${p(ss)}` : `${mm}:${p(ss)}`
+}
+// 56m 13s / 1h 4m / 9s
+const span = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`
 }
 const hhmmss = (at: number) => new Date(at).toTimeString().slice(0, 8)
 const tokens = (n: number) =>
@@ -67,6 +72,7 @@ const fileColor = (xy: string) =>
 const modelName = (id: string) =>
   id.replace(/\[.*\]$/, '').replace(/^claude-([a-z]+)-(\d+)-(\d+).*$/, (_, n: string, a: string, b: string) => `${n[0]?.toUpperCase()}${n.slice(1)} ${a}.${b}`)
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+const kTok1 = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${(n / 1e3).toFixed(1)}k`)
 const kTok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}k`)
 // ISO reset time -> "3h53m" / "1d0h"
 const until = (iso: string | undefined, now: number) => {
@@ -107,7 +113,7 @@ export const register: Register = on => {
           void log($, a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
         if (old && old.status !== a.status && a.status === 'completed')
           void log($, 'SUCCESS', `${names.get(a.id)}: completed`, true)
-        return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: old?.tools ?? 0 }
+        return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: old?.tools ?? 0, lastIn: old?.lastIn ?? 0, out: old?.out ?? 0 }
       })
       if (JSON.stringify(fresh.map(f => [f.id, f.status])) !== JSON.stringify(prev.map(f => [f.id, f.status])))
         await update($, forks, () => fresh)
@@ -204,6 +210,14 @@ export const register: Register = on => {
         first = false
         const ttftMs = Date.now() - t0
         void update($, liveInfo, l => ({ ...l, ttftMs }))
+      }
+      const c = step.value as { kind?: string; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | null }
+      if (e.agentId && c.kind === 'stop' && c.usage) {
+        const u = c.usage
+        const id = e.agentId
+        void update($, forks, list => list.map(f => (f.id === id
+          ? { ...f, lastIn: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens, out: f.out + u.output_tokens }
+          : f)))
       }
       yield step.value
       step = await it.next()
@@ -399,18 +413,32 @@ export const register: Register = on => {
       </Box> : <Text dimColor>Pasta atual não é um repositório git.</Text>)
       const gitRows = g.isRepo ? 4 + Math.min(fileRows + 1, g.files.length) + (g.pr ? 1 : 0) : 1
       const forkRoom = Math.max(2, room - gitRows - 3)
+      // One row per loop: main first, then each fork; ● marks the one in view, a press opens its transcript.
+      const viewed = e.props.view.agentId
+      const rowW = Math.max(20, W - 4)
+      const row = (key: string, kind: string, name: string, right: string, isOn: boolean, isEnded: boolean, onPress: () => unknown) => {
+        // Time and tokens sit outside the Button with a fixed width, so a long name is what gets cut.
+        const nameW = Math.max(4, rowW - 2 - 6 - right.length - 4)
+        const shown = name.length > nameW ? `${name.slice(0, nameW - 1)}…` : name
+        return (
+          <Box key={`r-${key}`} justifyContent="space-between">
+            <Button key={key} plain onPress={onPress}>
+              <Text color={isOn ? '#ffffff' : '#8a8a8a'}>{isOn ? '●' : '○'} </Text>
+              <Text bold={isOn} dimColor={!isOn}>{kind.padEnd(6)}</Text>
+              <Text bold={isOn} dimColor={!isOn || isEnded}>{shown}</Text>
+            </Button>
+            {right && <Box flexShrink={0} marginLeft={1}><Text dimColor={!isOn}>{right}</Text></Box>}
+          </Box>
+        )
+      }
       const forksBox = box('ACTIVE FORKS', 1, <Box flexDirection="column">
-        {fl.length === 0 && <Text dimColor>Nenhum fork.</Text>}
-        {fl.slice(-forkRoom).map((f, i) => {
-          const isLive = LIVE.includes(f.status)
-          const dot = f.status === 'running' ? '●' : isLive ? '●' : '○'
-          return (
-            <Box key={`f-${f.id}`} justifyContent="space-between">
-              <Text wrap="truncate-end"><Text color={STATUS_COLOR[f.status] ?? '#6c6c6c'}>{dot}</Text> {i + 1}: {f.name.slice(0, Math.max(8, Math.floor(W / 2)))} <Text color={STATUS_COLOR[f.status] ?? '#6c6c6c'}>({f.status.toUpperCase()})</Text> <Text dimColor>{f.tools} tools</Text></Text>
-              <Text dimColor>{clock(now - f.since)}</Text>
-            </Box>
-          )
-        })}
+        {row('f-main', 'main', '', `${span(now - (u.startedAt || now))} · ↓ ${kTok1(u.tokens)} tokens`, viewed === undefined, false, () => $.ui.view({}))}
+        {fl.slice(-forkRoom).map(f => row(
+          `f-${f.id}`, 'fork', f.name,
+          `${span(now - f.since)} · ↓ ${kTok1(f.lastIn + f.out)} tokens`,
+          viewed === f.id, !LIVE.includes(f.status),
+          () => $.ui.view({ agentId: f.id }),
+        ))}
       </Box>)
       body = <Box flexDirection="column">{gitBox}{forksBox}</Box>
     }
