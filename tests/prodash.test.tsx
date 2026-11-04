@@ -6,7 +6,7 @@ const pane = (bodyColumns: number) => ({
   component: 'Pane',
   requestId: 'prodash',
   props: {
-    title: 'Claude Dashboard Pro',
+    title: 'Pro Dash',
     isFocused: false,
     bodyColumns,
     placement: 'dock',

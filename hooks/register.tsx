@@ -369,7 +369,7 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     flushQueued = false // a re-run of register drops the old timer
-    await $.command.register({ name: 'prodash', description: 'Open the Dashboard Pro pane' }).catch(() => undefined)
+    await $.command.register({ name: 'prodash', description: 'Open the Pro Dash pane' }).catch(() => undefined)
     await update($, usage, u => ({ ...u, startedAt: u.startedAt || Date.now() })).catch(() => undefined)
     sessionCwd = await $.session.cwd().catch(() => '')
     const stored = await $.store.get('prodash.theme').catch(() => undefined)
@@ -534,7 +534,7 @@ export const register: Register = on => {
     $.clock.every(10000, () => quiet(gitSample()))
     $.clock.every(60000, () => quiet(prSample()))
 
-    quiet($.ui.open({ id: PANE, title: 'Claude Dashboard Pro', columns: 999, rows: 40 }))
+    quiet($.ui.open({ id: PANE, title: 'Pro Dash', columns: 999, rows: 40 }))
     return next(e)
   })
 
@@ -629,8 +629,8 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('command.run', { command: 'prodash' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', focus: true, columns: 999, rows: 40 })
-    return { text: 'Dashboard Pro opened. Keys 1–5 trigger the action bar.' }
+    await $.ui.open({ id: PANE, title: 'Pro Dash', focus: true, columns: 999, rows: 40 })
+    return { text: 'Pro Dash opened. Keys 1–5 trigger the action bar.' }
   })
 
   on('prompt.submit', async ($, e, next) => {
