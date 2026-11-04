@@ -162,6 +162,20 @@ test('ACTIVE FORKS lists main and each fork; a press opens its transcript', asyn
   expect(viewed).toContainEqual(expect.objectContaining({ agentId: 'a1' }))
 })
 
+test('ACTIVE FORKS shows the activity of a live fork, not of an ended one', async ($, on) => {
+  engine(on)
+  const fork = (id: string, status: string, act: string) => ({ id, name: `job ${id}`, status, since: 1_700_000_000_000 - 60_000, tools: 1, lastIn: 0, out: 0, act })
+  on('state.get', (_, e, next) =>
+    e.key === 'forks'
+      ? { value: { value: { shape: 'forks-2', value: [fork('a1', 'running', 'Counting own deposits'), fork('a2', 'completed', 'Bash old work')] }, version: 1 } }
+      : next(e))
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join(' ')
+  expect(texts).toContain('Counting own deposits')
+  expect(texts).not.toContain('Bash old work')
+  await ui.unmount()
+})
+
 // ---- GATE PERMS ----
 import type { Gate } from '../types/index'
 
