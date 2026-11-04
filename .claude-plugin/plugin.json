@@ -1,0 +1,1 @@
+{ "name": "prodash", "version": "0.1.0", "description": "Dashboard Pro: system, agents, session metrics, console and active forks in one pane", "types": "./types/index.d.ts" }
