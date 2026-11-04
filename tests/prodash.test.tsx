@@ -16,11 +16,14 @@ const pane = (bodyColumns: number) => ({
 } as const)
 
 const SURFACES = ['terminal', 'desktop'] as const
-const HEADERS = ['SYSTEM STATUS', 'AGENT OVERVIEW', 'SESSION METRICS', 'ACTIVE FORKS']
+const HEADERS = ['SYSTEM STATUS', 'AGENT OVERVIEW', 'METRICS', 'ACTIVE FORKS']
 
 // The engine beneath the plugin; the mocked clock holds session.start's timers.
 function engine(on: On, tools: Record<string, unknown> = {}) {
-  mock.clock(on, { now: 1_700_000_000_000 })
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  // $.tool.list() stand-in: tests push/replace entries to change what the session offers
+  const list: { name: string; description: string; mcp: boolean }[] = []
+  on('tool.list', () => ({ value: list.map(t => ({ ...t })) }) as never)
   on('command.register', () => ({ value: { command: 'prodash' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -32,6 +35,7 @@ function engine(on: On, tools: Record<string, unknown> = {}) {
   on('session.usage', () => ({ value: { startedAt: 0, context: { percent: 10 }, rateLimits: [] } as never }))
   on('agent.list', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } as never }))
+  return { clock, list }
 }
 
 test('resize: narrow and wide both draw every header', async ($, on) => {
@@ -69,6 +73,7 @@ test('the log buffer keeps the prompt then the tool call, in order', async ($, o
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'oi' })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await ($ as any).turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   expect(last.map(l => `[${l.level}] ${l.text}`)).toEqual(['[USER] you: oi', '[SUCCESS] main: Bash → ls'])
 })
 
@@ -82,6 +87,7 @@ test('600 tool calls keep logs at 500', { timeoutMs: 20_000 }, async ($, on) => 
     return next(e)
   })
   for (let i = 0; i < 600; i++) await $.tool.call({ tool: 'Bash', command: `ls ${i}` })
+  await ($ as any).turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   expect(longest).toBe(500)
 })
 
@@ -370,4 +376,129 @@ test('CronCreate adds a cron, CronDelete removes it', async ($, on) => {
   expect(box.crons as Cron[]).toContainEqual(expect.objectContaining({ id: 'c1', schedule: 'every 5 minutes', prompt: 'check deploy', recurring: true }))
   await $.tool.call({ tool: 'CronDelete', id: 'c1' } as never)
   expect(box.crons as Cron[]).toEqual([])
+})
+
+// ---- MCP SERVERS ----
+import type { McpServer } from '../types/index'
+
+const MCP: McpServer[] = [
+  { name: 'alpha', status: 'connected', tools: 20, calls: 4, errors: 1, totalMs: 6_000, lastAt: NOW - 1_000 },
+  { name: 'beta', status: 'connected', tools: 10, calls: 0, errors: 0, totalMs: 0 },
+  { name: 'gamma', status: 'failed', tools: 0, calls: 0, errors: 0, totalMs: 0, error: 'boom' },
+]
+
+const mcpTool = (name: string) => ({ name, description: '', mcp: true })
+
+function mcpSpy(on: On) {
+  const box: { m?: McpServer[] } = {}
+  on('state.set', (_, e, next) => {
+    if (e.plugin === 'prodash' && e.key === 'mcp') box.m = (e.value as { value: McpServer[] }).value
+    return next(e)
+  })
+  return box
+}
+const srv = (box: { m?: McpServer[] }, name: string) => box.m?.find(s => s.name === name)
+
+test('MCP SERVERS: box under the header row with summary and rows, 80 and 140', async ($, on) => {
+  engine(on)
+  on('state.get', (_, e, next) =>
+    e.plugin === 'prodash' && e.key === 'mcp' ? { value: { value: { shape: 'mcp-1', value: MCP }, version: 1 } } as never : next(e))
+  for (const surface of SURFACES) for (const cols of [80, 140]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface })
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    const texts = all.join('\n')
+    const at = all.findIndex(t => t.includes('MCP SERVERS'))
+    expect(at, `${surface} ${cols}\n${texts}`).toBeGreaterThanOrEqual(0)
+    expect(at, `${surface} ${cols}: below header row`).toBeGreaterThan(all.findIndex(t => t === 'AGENT OVERVIEW'))
+    // Session Metrics shares the row, to the right of MCP
+    expect(all.findIndex(t => t === 'METRICS'), `${surface} ${cols}: metrics right of MCP`).toBeGreaterThan(at)
+    for (const s of ['2 connected', '30 tools', '1 failed', 'alpha', 'beta', 'gamma', '20 tools', '10 tools', '4 calls', '1 err', 'avg 1.5s', 'boom'])
+      expect(texts, `${surface} ${cols}: ${s}\n${texts}`).toContain(s)
+    // beta has no calls: no avg on its row
+    expect(texts.match(/avg \d+\.\d+s/g)?.length, `${surface} ${cols}: one avg only`).toBe(1)
+    expect(await ui.find({ type: 'Button', key: 'a1' }), 'action bar still there').toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('MCP SERVERS box shows even with no servers', async ($, on) => {
+  engine(on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...pane(80), surface })
+    expect(await ui.find({ type: 'Text', text: /MCP SERVERS/ }), surface).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('session.start groups mcp__<server>__<tool> by server as connected', async ($, on) => {
+  const { list } = engine(on)
+  list.push(mcpTool('mcp__srv__a'), mcpTool('mcp__srv__b'), mcpTool('mcp__other__x'), mcpTool('mcp__my__deep__tool'),
+    { name: 'Bash', description: '', mcp: false })
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(box.m, 'mcp never written').toBeDefined()
+  expect(box.m!.map(s => s.name).sort()).toEqual(['my', 'other', 'srv'])
+  expect(srv(box, 'srv')).toMatchObject({ status: 'connected', tools: 2, calls: 0, errors: 0, totalMs: 0 })
+  expect(srv(box, 'my')).toMatchObject({ status: 'connected', tools: 1 })
+})
+
+test('a tool.call to mcp__srv__x counts calls, time, lastAt; isError counts an error', async ($, on) => {
+  const { list } = engine(on)
+  list.push(mcpTool('mcp__srv__x'), mcpTool('mcp__srv__bad'))
+  // a person's deny on an ask resolves the call errored: top-level { isError: true, text }
+  on('tool.check', (_, e, next) => e.tool === 'mcp__srv__bad' ? { decision: 'ask' } : next(e))
+  on('classic.PermissionRequest', () => ({ decision: { behavior: 'deny', message: 'no' } }) as never)
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__srv__x' } as never)
+  expect(srv(box, 'srv')).toMatchObject({ calls: 1, errors: 0 })
+  expect(typeof srv(box, 'srv')!.totalMs).toBe('number')
+  expect(typeof srv(box, 'srv')!.lastAt).toBe('number')
+  await $.tool.call({ tool: 'mcp__srv__bad' } as never)
+  expect(srv(box, 'srv')).toMatchObject({ calls: 2, errors: 1 })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(srv(box, 'srv')?.calls).toBe(2)
+})
+
+test('a denied mcp call counts an error', async ($, on) => {
+  const { list } = engine(on)
+  list.push(mcpTool('mcp__srv__x'))
+  on('tool.check', () => ({ decision: 'deny', reason: 'blocked' }))
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__srv__x' } as never)
+  expect(srv(box, 'srv')).toMatchObject({ calls: 1, errors: 1 })
+})
+
+test('WaitForMcpServers sets every status, adding unknown servers', async ($, on) => {
+  const { list } = engine(on, { WaitForMcpServers: { ready: false, connected: ['a'], failed: ['b'], stillPending: ['c'], needsAuth: ['d'], disabled: ['e'], unknown: [] } })
+  list.push(mcpTool('mcp__a__t'))
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'WaitForMcpServers' } as never)
+  expect(Object.fromEntries(box.m!.map(s => [s.name, s.status]))).toEqual({ a: 'connected', b: 'failed', c: 'pending', d: 'needs-auth', e: 'disabled' })
+  expect(srv(box, 'a')?.tools).toBe(1)
+})
+
+test('ToolSearch pending and failed servers set status and error', async ($, on) => {
+  engine(on, { ToolSearch: { matches: [], query: 'x', total_deferred_tools: 0, pending_mcp_servers: ['c'], failed_mcp_servers: [{ name: 'b', error: 'boom' }] } })
+  const box = mcpSpy(on)
+  await $.tool.call({ tool: 'ToolSearch', query: 'x' } as never)
+  expect(srv(box, 'c')?.status).toBe('pending')
+  expect(srv(box, 'b')).toMatchObject({ status: 'failed', error: 'boom' })
+})
+
+test('every 30s the list refreshes: stats kept, vanished servers dropped or kept failed', { timeoutMs: 30_000 }, async ($, on) => {
+  const { list, clock } = engine(on, { ToolSearch: { matches: [], query: 'x', total_deferred_tools: 0, failed_mcp_servers: [{ name: 'flaky', error: 'gone' }] } })
+  list.push(mcpTool('mcp__srv__a'), mcpTool('mcp__quiet__a'), mcpTool('mcp__flaky__a'))
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__srv__a' } as never)
+  await $.tool.call({ tool: 'ToolSearch', query: 'x' } as never)
+  list.splice(0, list.length, mcpTool('mcp__srv__a'), mcpTool('mcp__srv__b'), mcpTool('mcp__new__a'))
+  await clock.advance(30_000)
+  expect(srv(box, 'srv'), 'refresh').toMatchObject({ status: 'connected', tools: 2, calls: 1 })
+  expect(srv(box, 'new')?.status).toBe('connected')
+  expect(srv(box, 'quiet'), 'no failure reported: dropped').toBeUndefined()
+  expect(srv(box, 'flaky')).toMatchObject({ status: 'failed', error: 'gone' })
 })
