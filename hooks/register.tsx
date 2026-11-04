@@ -134,11 +134,12 @@ function parsePlan(text: string): Plan['steps'] {
 }
 const words = (t: string) => t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 3)
 // A step is done when a completed todo/task shares half of its words (or its box is checked).
-function stepState(step: Plan['steps'][number], list: Todo[]): 'done' | 'doing' | 'todo' {
+type TodoWords = { status: string; words: Set<string> }
+function stepState(step: Plan['steps'][number], list: TodoWords[]): 'done' | 'doing' | 'todo' {
   if (step.isChecked) return 'done'
   const ws = words(step.text)
   if (!ws.length) return 'todo'
-  const match = (t: Todo) => { const tw = new Set(words(t.content)); return ws.filter(w => tw.has(w)).length / ws.length >= 0.5 }
+  const match = (t: TodoWords) => ws.filter(w => t.words.has(w)).length / ws.length >= 0.5
   if (list.some(t => t.status === 'completed' && match(t))) return 'done'
   if (list.some(t => t.status === 'in_progress' && match(t))) return 'doing'
   return 'todo'
@@ -173,34 +174,63 @@ function quiet(p: Promise<unknown>) {
   p.catch(() => undefined)
 }
 
-// Gate writes run one after another so a check and its outcome never race.
-let gateQ: Promise<unknown> = Promise.resolve()
-function gateWrite($: EngineInterface, fn: (g: Gate) => Gate) {
-  gateQ = gateQ.then(() => update($, gate, fn)).catch(() => undefined)
-  return gateQ
-}
-
-// Hot-path data kept in module memory and written to state in batches (flushSoon / turn.complete).
+// Per-call data lives in module memory; flushNow writes only the keys marked dirty, at most once a
+// second (flushSoon) and at the end of each turn. A plain tool call never writes state itself.
+type Dirty = 'perms' | 'gate' | 'mcp' | 'forks' | 'requests' | 'live'
+type ForkCount = { tools: number; lastIn: number; out: number }
+type McpStat = { calls: number; errors: number; totalMs: number; lastAt?: number }
 const logBuf: LogLine[] = []
 const permMap = new Map<string, Perm>()
+const forkCounts = new Map<string, ForkCount>()
+const mcpStats = new Map<string, McpStat>()
+const dirty = new Set<Dirty>()
+let gateMem: Gate = EMPTY_GATE
+let reqTools = 0 // tool calls of the open request not yet written
+let reqsDelta = 0 // model requests not yet written
+let livePatch: Partial<Live> = {}
 let flushQueued = false
 
 function log(_$: EngineInterface, level: Level, text: string, isSub = false) {
-  logBuf.push({ at: Date.now(), level, text, isSub })
+  logBuf.push({ at: Date.now(), level, text: text.slice(0, 300), isSub })
   if (logBuf.length > MAX_LOGS) logBuf.splice(0, logBuf.length - MAX_LOGS)
 }
 function countTool(tool: string, denied: boolean) {
   const one = permMap.get(tool) ?? { tool, ok: 0, denied: 0 }
   permMap.set(tool, { ...one, ok: one.ok + (denied ? 0 : 1), denied: one.denied + (denied ? 1 : 0) })
 }
-function flushNow($: EngineInterface) {
-  return Promise.all([
-    update($, logs, () => logBuf.slice()),
-    update($, perms, () => [...permMap.values()].sort((a, b) => b.ok + b.denied - a.ok - a.denied)),
-  ])
+function forkCount(id: string): ForkCount {
+  let c = forkCounts.get(id)
+  if (!c) forkCounts.set(id, (c = { tools: 0, lastIn: 0, out: 0 }))
+  return c
 }
-// At most one batch write per second while tools run.
-function flushSoon($: EngineInterface) {
+function flushNow($: EngineInterface, withLogs = false) {
+  const keys = new Set(dirty)
+  dirty.clear()
+  const jobs: Promise<unknown>[] = []
+  if (withLogs) jobs.push(update($, logs, () => logBuf.slice()))
+  if (keys.has('perms')) jobs.push(update($, perms, () => [...permMap.values()].sort((a, b) => b.ok + b.denied - a.ok - a.denied)))
+  if (keys.has('gate')) jobs.push(update($, gate, () => gateMem))
+  if (keys.has('mcp')) jobs.push(update($, mcp, list => {
+    const out = list.map(x => ({ ...x, ...mcpStats.get(x.name) }))
+    for (const [name, st] of mcpStats) if (!out.some(x => x.name === name)) out.push({ ...blankServer(name, 'connected'), ...st })
+    return out
+  }))
+  if (keys.has('forks')) jobs.push(update($, forks, list => list.map(f => ({ ...f, ...forkCounts.get(f.id) }))))
+  if (keys.has('requests')) {
+    const n = reqTools
+    reqTools = 0
+    jobs.push(update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + n } : q))))
+  }
+  if (keys.has('live')) {
+    const d = reqsDelta, patch = livePatch
+    reqsDelta = 0
+    livePatch = {}
+    jobs.push(update($, liveInfo, l => ({ ...l, ...patch, reqs: l.reqs + d })))
+  }
+  return Promise.all(jobs)
+}
+function markDirty($: EngineInterface, key: Dirty) {
+  dirty.add(key)
   if (flushQueued) return
   flushQueued = true
   $.clock.after(1000, () => {
@@ -231,7 +261,15 @@ async function board($: EngineInterface, tool: string, input: Record<string, unk
     if (steps.length) await update($, plan, () => ({ at: now, steps }))
   } else if (tool === 'TaskCreate') {
     const t = res.task as { id?: string; subject?: string } | undefined
-    if (t?.id) await update($, todos, list => [...list.filter(x => x.id !== t.id), { id: t.id, content: t.subject ?? '', status: 'pending' }])
+    // cap: drop the oldest completed tasks past 100
+    if (t?.id) await update($, todos, list => {
+      const next = [...list.filter(x => x.id !== t.id), { id: t.id!, content: t.subject ?? '', status: 'pending' }]
+      while (next.length > 100) {
+        const k = next.findIndex(x => x.status === 'completed')
+        next.splice(k >= 0 ? k : 0, 1)
+      }
+      return next
+    })
   } else if (tool === 'TaskUpdate' && typeof input.taskId === 'string') {
     const id = input.taskId, st = input.status as string | undefined, sub = input.subject as string | undefined
     await update($, todos, list => (st === 'deleted'
@@ -291,20 +329,29 @@ export const register: Register = on => {
 
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'prodash', description: 'Open the Dashboard Pro pane' })
-    await update($, usage, u => ({ ...u, startedAt: Date.now() }))
-    sessionCwd = await $.session.cwd()
-    if (logBuf.length === 0) logBuf.push(...(await read($, logs)))
-    if (permMap.size === 0) for (const p of await read($, perms)) permMap.set(p.tool, p)
+    flushQueued = false // a re-run of register drops the old timer
+    await $.command.register({ name: 'prodash', description: 'Open the Dashboard Pro pane' }).catch(() => undefined)
+    await update($, usage, u => ({ ...u, startedAt: u.startedAt || Date.now() })).catch(() => undefined)
+    sessionCwd = await $.session.cwd().catch(() => '')
+    // seed module memory from what an earlier load stored
+    await Promise.all([
+      read($, logs).then(v => { if (!logBuf.length) logBuf.push(...v) }),
+      read($, perms).then(v => { if (!permMap.size) for (const x of v) permMap.set(x.tool, x) }),
+      read($, gate).then(v => { if (!gateMem.total) gateMem = v }),
+      read($, mcp).then(v => { if (!mcpStats.size) for (const x of v) if (x.calls) mcpStats.set(x.name, { calls: x.calls, errors: x.errors, totalMs: x.totalMs, lastAt: x.lastAt }) }),
+      read($, forks).then(v => { for (const f of v) if (!forkCounts.has(f.id)) forkCounts.set(f.id, { tools: f.tools, lastIn: f.lastIn, out: f.out }) }),
+    ]).catch(() => undefined)
 
     // Agents: every 250ms while a fork is alive (spawn marks one at once), every 1s otherwise.
     let tick = 0
-    $.clock.every(250, async () => {
+    const pollAgents = async () => {
       const anyLive = [...forkStatus.values()].some(st => LIVE.includes(st))
       if (!anyLive && tick++ % 4) return
       const list = await $.agent.list()
       const changed = list.length !== forkStatus.size || list.some(a => forkStatus.get(a.id) !== a.status)
       if (!changed) return
+      for (const id of [...names.keys()]) if (!list.some(a => a.id === id)) names.delete(id)
+      for (const id of [...forkCounts.keys()]) if (!list.some(a => a.id === id)) forkCounts.delete(id)
       for (const a of list) {
         names.set(a.id, a.description || a.name || a.type)
         const was = forkStatus.get(a.id)
@@ -316,14 +363,19 @@ export const register: Register = on => {
       for (const a of list) forkStatus.set(a.id, a.status)
       const now = Date.now()
       // merge into the current value so concurrent tools/tokens increments are kept
-      await update($, forks, cur => list.map(a => {
-        const old = cur.find(f => f.id === a.id)
-        return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: old?.tools ?? 0, lastIn: old?.lastIn ?? 0, out: old?.out ?? 0 }
-      }))
-    })
+      await update($, forks, cur => {
+        const byId = new Map(cur.map(f => [f.id, f]))
+        return list.map(a => {
+          const old = byId.get(a.id)
+          const c = forkCounts.get(a.id)
+          return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: c?.tools ?? old?.tools ?? 0, lastIn: c?.lastIn ?? old?.lastIn ?? 0, out: c?.out ?? old?.out ?? 0 }
+        })
+      })
+    }
+    $.clock.every(250, () => quiet(pollAgents()))
 
     // Usage: write only when a figure changed; otherwise just redraw so the clocks tick.
-    $.clock.every(1000, async () => {
+    const pollUsage = async () => {
       const u = await $.session.usage()
       const ctx = u.context.percent
       const key = JSON.stringify([u.startedAt, ctx, u.context.tokens, u.context.window, u.rateLimits, u.cost?.usd])
@@ -345,7 +397,8 @@ export const register: Register = on => {
         lastStatus = text
         $.ui.status(text)
       }
-    })
+    }
+    $.clock.every(1000, () => quiet(pollUsage()))
 
     // System load: Windows via CIM. shortcut: Windows only, add /proc or vm_stat for other OSes.
     let sysBusy = false
@@ -368,7 +421,7 @@ export const register: Register = on => {
     }
     quiet(sample())
     // shortcut: one short-lived PowerShell per sample; a long-lived streaming process would cost less CPU.
-    $.clock.every(10000, () => quiet(sample()))
+    $.clock.every(15000, () => quiet(sample()))
 
     // Git: status every 5s (30s outside a repo); log only when HEAD moves; remote + PR every 60s.
     const cwd = sessionCwd
@@ -408,7 +461,7 @@ export const register: Register = on => {
       pr = out || undefined
       lastOid = '' // let the next status re-read the last commit (it may say "(5 minutes ago)")
     }
-    if ((await read($, requests)).length === 0) {
+    if ((await read($, requests).catch(() => [1])).length === 0) {
       const msgs = await $.session.messages().catch(() => [])
       const seed: Request[] = []
       for (const m of msgs) {
@@ -437,10 +490,10 @@ export const register: Register = on => {
     const model = await $.session.model().catch(() => undefined)
     if (model) await update($, liveInfo, l => ({ ...l, model: l.model ?? model }))
     quiet(prSample().then(gitSample))
-    $.clock.every(5000, () => quiet(gitSample()))
+    $.clock.every(10000, () => quiet(gitSample()))
     $.clock.every(60000, () => quiet(prSample()))
 
-    void $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', columns: 999, rows: 40 })
+    quiet($.ui.open({ id: PANE, title: 'Claude Dashboard Pro', columns: 999, rows: 40 }))
     return next(e)
   })
 
@@ -453,27 +506,25 @@ export const register: Register = on => {
   // Each model request: count it, note model/effort, time its first chunk (TTFT).
   on('turn.step', async function* ($, e, next) {
     const t0 = Date.now()
-    quiet(update($, liveInfo, l => ({
-      ...l,
-      reqs: l.reqs + 1,
-      ...(e.agentId ? {} : { model: e.model, effort: e.effort === undefined ? l.effort : String(e.effort) }),
-    })))
+    reqsDelta++
+    if (!e.agentId) livePatch = { ...livePatch, model: e.model, ...(e.effort === undefined ? {} : { effort: String(e.effort) }) }
+    markDirty($, 'live')
     const it = next(e)
     let first = true
     let step = await it.next()
     while (!step.done) {
       if (first && !e.agentId) {
         first = false
-        const ttftMs = Date.now() - t0
-        quiet(update($, liveInfo, l => ({ ...l, ttftMs })))
+        livePatch = { ...livePatch, ttftMs: Date.now() - t0 }
+        markDirty($, 'live')
       }
       const c = step.value as { kind?: string; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | null }
       if (e.agentId && c.kind === 'stop' && c.usage) {
         const u = c.usage
-        const id = e.agentId
-        quiet(update($, forks, list => list.map(f => (f.id === id
-          ? { ...f, lastIn: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens, out: f.out + u.output_tokens }
-          : f))))
+        const fc = forkCount(e.agentId)
+        fc.lastIn = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+        fc.out += u.output_tokens
+        markDirty($, 'forks')
       }
       yield step.value
       step = await it.next()
@@ -493,25 +544,25 @@ export const register: Register = on => {
     const ev: GateEvent = {
       id: e.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
       detail: detail((e.input ?? {}) as Record<string, unknown>),
-      reason: r.reason, rule: r.rule, agent: e.agentId, isReadOnly: e.isReadOnly === true,
+      reason: r.reason?.slice(0, 200), rule: r.rule, agent: e.agentId, isReadOnly: e.isReadOnly === true,
     }
-    gateWrite($, g => {
-      const rules = r.rule
-        ? [...g.rules.filter(x => x.rule !== r.rule), { rule: r.rule, n: (g.rules.find(x => x.rule === r.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
-        : g.rules
-      return {
-        ...g,
-        events: [...g.events, ev].slice(-GATE_MAX),
-        total: g.total + 1,
-        counts: { ...g.counts, [kind]: g.counts[kind] + 1 },
-        cats: { ...g.cats, [ev.cat]: g.cats[ev.cat] + 1 },
-        reads: g.reads + (ev.isReadOnly ? 1 : 0),
-        writes: g.writes + (ev.isReadOnly ? 0 : 1),
-        main: g.main + (e.agentId ? 0 : 1),
-        forks: g.forks + (e.agentId ? 1 : 0),
-        rules,
-      }
-    })
+    const g = gateMem
+    const rules = r.rule
+      ? [...g.rules.filter(x => x.rule !== r.rule), { rule: r.rule, n: (g.rules.find(x => x.rule === r.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
+      : g.rules
+    gateMem = {
+      ...g,
+      events: [...g.events, ev].slice(-GATE_MAX),
+      total: g.total + 1,
+      counts: { ...g.counts, [kind]: g.counts[kind] + 1 },
+      cats: { ...g.cats, [ev.cat]: g.cats[ev.cat] + 1 },
+      reads: g.reads + (ev.isReadOnly ? 1 : 0),
+      writes: g.writes + (ev.isReadOnly ? 0 : 1),
+      main: g.main + (e.agentId ? 0 : 1),
+      forks: g.forks + (e.agentId ? 1 : 0),
+      rules,
+    }
+    markDirty($, 'gate')
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
@@ -532,9 +583,9 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
-    await update($, liveInfo, l => ({ ...l, compactions: l.compactions + 1 }))
+    await update($, liveInfo, l => ({ ...l, compactions: l.compactions + 1 })).catch(() => undefined)
     return r
-  })
+  }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('command.run', { command: 'prodash' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', focus: true, columns: 999, rows: 40 })
@@ -562,8 +613,13 @@ export const register: Register = on => {
     const who = e.agentId ? names.get(e.agentId) ?? 'fork' : 'main'
     if (tool === 'TodoWrite' && Array.isArray(raw.todos))
       quiet(update($, todos, list => [...list.filter(t => t.id), ...(raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status }))]))
-    if (!e.agentId) quiet(update($, requests, list => (list.length ? list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + 1 } : q)) : list)))
-    if (e.agentId) quiet(update($, forks, list => list.map(f => (f.id === e.agentId ? { ...f, tools: f.tools + 1 } : f))))
+    if (!e.agentId) {
+      reqTools++
+      markDirty($, 'requests')
+    } else {
+      forkCount(e.agentId).tools++
+      markDirty($, 'forks')
+    }
 
     const t0 = Date.now()
     const r = await next(e)
@@ -571,11 +627,9 @@ export const register: Register = on => {
     const srv = mcpServer(tool)
     if (srv) {
       const ms = Date.now() - t0, failed = denied || (r as { isError?: boolean }).isError === true
-      quiet(update($, mcp, list => {
-        const one = list.find(x => x.name === srv) ?? blankServer(srv, 'connected')
-        const upd = { ...one, calls: one.calls + 1, errors: one.errors + (failed ? 1 : 0), totalMs: one.totalMs + ms, lastAt: Date.now() }
-        return list.some(x => x.name === srv) ? list.map(x => (x.name === srv ? upd : x)) : [...list, upd]
-      }))
+      const st = mcpStats.get(srv) ?? { calls: 0, errors: 0, totalMs: 0 }
+      mcpStats.set(srv, { calls: st.calls + 1, errors: st.errors + (failed ? 1 : 0), totalMs: st.totalMs + ms, lastAt: Date.now() })
+      markDirty($, 'mcp')
     }
     if (!denied) void board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
     const id = e.tool_use_id
@@ -584,27 +638,34 @@ export const register: Register = on => {
       const rr = r as { isError?: boolean; text?: string }
       // shortcut: no event says "the ask was refused"; an errored result worded as a refusal stands for it.
       const refused = denied || (rr.isError === true && DENIAL.test(rr.text ?? ''))
-      await gateWrite($, g => {
-        const ev = g.events.find(x => x.id === id && x.kind === 'p')
-        return ev ? settle(g, id, refused ? 'd' : ev.via === 'classifier' ? 'c' : 'h', Date.now()) : g
-      })
+      const ev = gateMem.events.find(x => x.id === id && x.kind === 'p')
+      if (ev) {
+        gateMem = settle(gateMem, id, refused ? 'd' : ev.via === 'classifier' ? 'c' : 'h', Date.now())
+        markDirty($, 'gate')
+      }
     }
     const isError = !denied && (r as { isError?: boolean }).isError === true
     log($, denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
       `${who}: ${tool} → ${denied ? `denied (${r.deny})` : detail(raw)}`, !!e.agentId)
     countTool(tool, denied)
-    flushSoon($)
+    markDirty($, 'perms')
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     const u = r.usage
-    const cost = (await $.session.usage()).cost?.usd
+    const cost = (await $.session.usage().catch(() => undefined))?.cost?.usd
+    // an ask whose call never came back within 15 min was refused before it ran
     const old15 = Date.now() - 15 * 60_000
-    for (const [id, at] of pending) if (at < old15) pending.delete(id)
+    for (const [id, at] of pending) if (at < old15) {
+      pending.delete(id)
+      gateMem = settle(gateMem, id, 'd', Date.now())
+      dirty.add('gate')
+    }
+    // the batch first: it adds the open request's tool calls before the request is closed
+    await flushNow($, true).catch(() => undefined)
     await Promise.all([
-      flushNow($),
       e.agentId ? undefined : update($, liveInfo, l => ({ ...l, isBusy: false })),
       e.agentId ? undefined : update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, isDone: true, durationMs: e.durationMs } : q))),
       update($, usage, old => ({
@@ -614,9 +675,9 @@ export const register: Register = on => {
       turnBaseUsd: cost,
       usd: cost,
     })),
-    ])
+    ]).catch(() => undefined)
     return r
-  })
+  }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('ui.render', { component: 'SessionMode' }, ($, e, next) => {
     modes = [...e.props.modes]
@@ -683,8 +744,12 @@ export const register: Register = on => {
     const save = async () => {
       const list = logBuf
       const path = `${sessionCwd}/prodash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
-      await $.fs.write(path, list.map(l => `[${hhmmss(l.at)}] [${l.level}] ${l.text}`).join('\n') + '\n')
-      $.ui.toast(`Log saved: ${path}`)
+      try {
+        await $.fs.write(path, list.map(l => `[${hhmmss(l.at)}] [${l.level}] ${l.text}`).join('\n') + '\n')
+        $.ui.toast(`Log saved: ${path}`)
+      } catch (err) {
+        $.ui.toast(`Log not saved: ${String(err).slice(0, 120)}`)
+      }
     }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
     const actions = (
@@ -795,7 +860,8 @@ export const register: Register = on => {
       const title = (t: string, extra?: string) => <Text color={CYAN} bold wrap="truncate-end">{t}{extra ? <Text dimColor bold={false}>  {extra}</Text> : ''}</Text>
       const rel = (p: string) => (p.startsWith(cwd) ? p.slice(cwd.length).replace(/^[\\/]/, '') : p)
 
-      const states = (pl?.steps ?? []).map(st => stepState(st, list))
+      const tw = list.map(t => ({ status: t.status, words: new Set(words(t.content)) })) // once per draw
+      const states = (pl?.steps ?? []).map(st => stepState(st, tw))
       const done = states.filter(x => x === 'done').length
       const tc = (st: string) => list.filter(t => t.status === st).length
       const planSec = <Box flexDirection="column">
