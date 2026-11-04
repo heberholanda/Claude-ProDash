@@ -59,6 +59,18 @@ export type Gate = {
   waitMs: number
   waits: number
 }
+/** connected: has tools in the session; the rest come from WaitForMcpServers / ToolSearch results */
+export type McpStatus = 'connected' | 'pending' | 'failed' | 'needs-auth' | 'disabled'
+export type McpServer = {
+  name: string
+  status: McpStatus
+  tools: number
+  calls: number
+  errors: number
+  totalMs: number
+  lastAt?: number
+  error?: string
+}
 /** a TodoWrite item (no id) or a Task tool task (id) */
 export type Todo = { id?: string; content: string; status: string }
 /** a file edited this session through Edit/Write/MultiEdit/NotebookEdit */
@@ -89,6 +101,7 @@ declare module 'claude-code' {
       plan: Shaped<Plan | null>
       bg: Shaped<Bg[]>
       crons: Shaped<Cron[]>
+      mcp: Shaped<McpServer[]>
       live: Shaped<Live>
     }
   }
