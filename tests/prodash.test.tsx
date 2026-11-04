@@ -35,7 +35,11 @@ function engine(on: On, tools: Record<string, unknown> = {}) {
   on('session.usage', () => ({ value: { startedAt: 0, context: { percent: 10 }, rateLimits: [] } as never }))
   on('agent.list', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } as never }))
-  return { clock, list }
+  // $.store stand-in: tests seed or read `store` directly
+  const store = new Map<string, unknown>()
+  on('store.get', (_, e) => ({ value: store.get(e.key) }) as never)
+  on('store.set', (_, e) => { store.set(e.key, e.value); return { value: undefined } as never })
+  return { clock, list, store }
 }
 
 test('resize: narrow and wide both draw every header', async ($, on) => {
@@ -523,4 +527,135 @@ test('every 30s the list refreshes: stats kept, vanished servers dropped or kept
   expect(srv(box, 'new')?.status).toBe('connected')
   expect(srv(box, 'quiet'), 'no failure reported: dropped').toBeUndefined()
   expect(srv(box, 'flaky')).toMatchObject({ status: 'failed', error: 'gone' })
+})
+
+// ---- THEME ----
+import type { ThemeState } from '../types/index'
+
+// A versioned in-memory theme cell: seeded read, writes recorded (box.t = last write or seed).
+function seedTheme(on: On, t?: ThemeState) {
+  const box: { t?: ThemeState; writes: ThemeState[]; version: number } = { t, writes: [], version: t ? 1 : 0 }
+  const isTheme = (e: { plugin: string; key: string }) => e.plugin === 'prodash' && e.key === 'theme'
+  on('state.get', (_, e, next) =>
+    isTheme(e) && box.t ? { value: { value: { shape: 'theme-1', value: box.t }, version: box.version } } as never : next(e))
+  on('state.set', (_, e, next) => {
+    if (!isTheme(e)) return next(e)
+    if (e.ifVersion !== undefined && e.ifVersion !== box.version) return { value: { isSet: false, version: box.version } } as never
+    box.writes.push(box.t = (e.value as { value: ThemeState }).value)
+    return { value: { isSet: true, version: ++box.version } } as never
+  })
+  return box
+}
+const themeSpy = (on: On) => seedTheme(on)
+
+const PRESETS = ['default', 'matrix', 'dracula', 'nord', 'amber', 'cyberpunk', 'mono']
+const ROLES = ['border', 'ok', 'warn', 'bad', 'info', 'accent', 'dim', 'white']
+
+async function openTheme(ui: any, label: string) {
+  await ui.press({ key: 'a5' })
+  expect(await ui.find({ type: 'Text', text: /THEME/ }), `${label}: THEME view`).toBeDefined()
+}
+
+test('action bar is a titled box with a1..a5, a5 = THEME', async ($, on) => {
+  engine(on)
+  for (const surface of SURFACES) for (const cols of [80, 160]) {
+    const ui = await $.ui.mount({ ...pane(cols), surface })
+    expect(await ui.find({ type: 'Text', text: 'ACTION BAR' }), `${surface} ${cols}: title`).toBeDefined()
+    for (const k of ['a1', 'a2', 'a3', 'a4', 'a5']) expect(await ui.find({ type: 'Button', key: k }), `${surface} ${cols}: ${k}`).toBeDefined()
+    const a5 = await ui.find({ type: 'Button', key: 'a5' })
+    expect(String(a5?.props.label ?? a5?.text), `${surface} ${cols}: a5 label`).toMatch(/THEME/)
+    await ui.unmount()
+  }
+})
+
+test('a5 opens THEME: every preset, custom, current marked ●; back returns', async ($, on) => {
+  engine(on)
+  seedTheme(on, { name: 'nord', base: 'nord', custom: {} })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...pane(120), surface })
+    await openTheme(ui, surface)
+    for (const p of [...PRESETS, 'custom']) expect(await ui.find({ type: 'Button', key: `th-${p}` }), `${surface}: th-${p}`).toBeDefined()
+    const nord = await ui.find({ type: 'Button', key: 'th-nord' })
+    const dflt = await ui.find({ type: 'Button', key: 'th-default' })
+    expect(`${nord?.props.label ?? ''} ${nord?.text ?? ''}`, `${surface}: current marked`).toContain('●')
+    expect(`${dflt?.props.label ?? ''} ${dflt?.text ?? ''}`, `${surface}: others unmarked`).not.toContain('●')
+    for (const r of ROLES) {
+      expect(await ui.find({ type: 'Input', key: `in-${r}` }), `${surface}: in-${r}`).toBeDefined()
+      expect(await ui.find({ type: 'Select', key: `sel-${r}` }), `${surface}: sel-${r}`).toBeDefined()
+    }
+    expect(await ui.find({ type: 'Text', text: 'ACTIVE FORKS' })).toBeUndefined()
+    await ui.press({ key: 'back' })
+    expect(await ui.find({ type: 'Text', text: 'ACTIVE FORKS' }), `${surface}: back`).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('th-matrix writes the preset, keeps custom, persists it to prodash.theme', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, { name: 'custom', base: 'default', custom: { ok: '#010203' } })
+  const ui = await $.ui.mount({ ...pane(120), surface: 'terminal' })
+  await openTheme(ui, 'terminal')
+  await ui.press({ key: 'th-matrix' })
+  expect(box.t).toEqual({ name: 'matrix', base: 'matrix', custom: { ok: '#010203' } })
+  expect(store.get('prodash.theme')).toEqual(box.t)
+  await ui.unmount()
+})
+
+test('custom: in-ok takes #rrggbb or rrggbb, rejects zzz; sel-border sets border; th-reset clears', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, { name: 'nord', base: 'nord', custom: {} })
+  for (const surface of SURFACES) {
+    box.t = { name: 'nord', base: 'nord', custom: {} }
+    const ui = await $.ui.mount({ ...pane(120), surface })
+    await openTheme(ui, surface)
+    await ui.input({ key: 'in-ok', text: '#123abc' })
+    expect(box.t, `${surface}: #123abc`).toEqual({ name: 'custom', base: 'nord', custom: { ok: '#123abc' } })
+    await ui.input({ key: 'in-ok', text: '00ff00' })
+    expect(box.t?.custom.ok, `${surface}: bare hex`).toBe('#00ff00')
+    const n = box.writes.length
+    await ui.input({ key: 'in-ok', text: 'zzz' })
+    expect(box.writes.slice(n).some(t => /z/.test(t.custom.ok ?? '')), `${surface}: zzz written`).toBe(false)
+    expect(box.t?.custom.ok, `${surface}: ok kept`).toBe('#00ff00')
+    const sel = await ui.find({ type: 'Select', key: 'sel-border' })
+    const opts = (sel?.props.options ?? []) as { value: string }[]
+    expect(opts.length, `${surface}: sel-border options`).toBeGreaterThan(0)
+    const pick = opts.at(-1)!.value
+    await ui.select({ key: 'sel-border', value: pick })
+    expect(box.t, `${surface}: sel-border`).toMatchObject({ name: 'custom', base: 'nord', custom: { ok: '#00ff00', border: pick } })
+    expect(store.get('prodash.theme'), `${surface}: persisted`).toEqual(box.t)
+    await ui.press({ key: 'th-reset' })
+    expect(box.t?.custom, `${surface}: reset`).toEqual({})
+    await ui.press({ key: 'back' })
+    await ui.unmount()
+  }
+})
+
+test('render uses the palette: custom border colours section titles and box borders', async ($, on) => {
+  engine(on)
+  seedTheme(on, { name: 'custom', base: 'default', custom: { border: '#123456' } })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...pane(120), surface })
+    // the title's wrapper Text also matches; take the leaf that draws exactly the title
+    const t = (await ui.findAll({ type: 'Text', text: 'SYSTEM STATUS' })).find(x => x.text === 'SYSTEM STATUS')
+    expect(t?.props.color, `${surface}: SYSTEM STATUS colour`).toBe('#123456')
+    const boxes = await ui.findAll({ type: 'Box' })
+    expect(boxes.some(b => b.props.borderColor === '#123456'), `${surface}: a box border is #123456`).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('session.start loads a valid stored theme', async ($, on) => {
+  const { store } = engine(on)
+  const box = themeSpy(on)
+  store.set('prodash.theme', { name: 'dracula', base: 'dracula', custom: { ok: '#abcdef' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(box.t).toEqual({ name: 'dracula', base: 'dracula', custom: { ok: '#abcdef' } })
+})
+
+test('session.start ignores a stored theme that is not a ThemeState', async ($, on) => {
+  const { store } = engine(on)
+  const box = themeSpy(on)
+  store.set('prodash.theme', { name: 42, custom: 'x' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(box.writes.some(t => (t as any).name === 42)).toBe(false)
 })
