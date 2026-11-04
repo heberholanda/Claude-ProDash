@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Fork, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Usage } from '../types'
+import type { Bg, Cron, Fork, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
 
 const PANE = 'prodash'
 const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
@@ -15,7 +15,17 @@ const mode = atom({ plugin: 'prodash', key: 'mode' } as const, 'main' as Mode)
 const perms = atom({ plugin: 'prodash', key: 'perms' } as const, [] as Perm[], { shape: 'perms-1' })
 const git = atom({ plugin: 'prodash', key: 'git' } as const, { isRepo: false, ahead: 0, behind: 0, stash: 0, files: [] } as Git, { shape: 'git-1' })
 const liveInfo = atom({ plugin: 'prodash', key: 'live' } as const, { reqs: 0, isBusy: false, compactions: 0 } as Live, { shape: 'live-1' })
-const todos = atom({ plugin: 'prodash', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
+const EMPTY_GATE: Gate = {
+  events: [], total: 0, counts: { a: 0, c: 0, h: 0, p: 0, d: 0 }, cats: { f: 0, s: 0, o: 0 },
+  reads: 0, writes: 0, main: 0, forks: 0, rules: [], waitMs: 0, waits: 0,
+}
+const gate = atom({ plugin: 'prodash', key: 'gate' } as const, EMPTY_GATE, { shape: 'gate-1' })
+const todos = atom({ plugin: 'prodash', key: 'todos' } as const, [] as Todo[], { shape: 'todos-2' })
+const touched = atom({ plugin: 'prodash', key: 'touched' } as const, [] as Touched[], { shape: 'touched-1' })
+const requests = atom({ plugin: 'prodash', key: 'requests' } as const, [] as Request[], { shape: 'requests-1' })
+const plan = atom({ plugin: 'prodash', key: 'plan' } as const, null as Plan | null, { shape: 'plan-1' })
+const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 'bg-1' })
+const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
 const STATUS_COLOR: Record<string, string> = {
   running: '#5fd75f',
@@ -81,6 +91,58 @@ const until = (iso: string | undefined, now: number) => {
   return m >= 1440 ? `${Math.floor(m / 1440)}d${Math.floor((m % 1440) / 60)}h` : `${Math.floor(m / 60)}h${m % 60}m`
 }
 
+const FILE_TOOLS = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']
+const SHELL_TOOLS = ['Bash', 'PowerShell']
+const toolCat = (tool: string): 'f' | 's' | 'o' => (FILE_TOOLS.includes(tool) ? 'f' : SHELL_TOOLS.includes(tool) ? 's' : 'o')
+const GATE_COLOR: Record<GateKind, string> = { a: '#6c6c6c', c: '#8787ff', h: '#5fd75f', p: '#ffd75f', d: '#ff5f5f' }
+const GATE_MAX = 300
+const DENIAL = /doesn't want to proceed|rejected|denied|not allowed|permission/i
+
+// Settle a pending ask once its call has run: approved by the classifier or a person, or denied.
+function settle(g: Gate, id: string, kind: GateKind, now: number): Gate {
+  const ev = g.events.find(x => x.id === id && x.kind === 'p')
+  if (!ev) return g
+  const waitMs = now - ev.at
+  const counts = { ...g.counts, p: Math.max(0, g.counts.p - 1), [kind]: g.counts[kind] + 1 }
+  return { ...g, counts, waitMs: g.waitMs + waitMs, waits: g.waits + 1, events: g.events.map(x => (x === ev ? { ...x, kind, waitMs } : x)) }
+}
+
+type Patch = { lines: string[] }[]
+// +/- lines of a structured patch
+const patchCount = (patch: Patch | undefined) => {
+  let add = 0, del = 0
+  for (const h of patch ?? []) for (const l of h.lines) {
+    if (l.startsWith('+')) add++
+    else if (l.startsWith('-')) del++
+  }
+  return { add, del }
+}
+
+// Plan steps: numbered lines win, else checkboxes, else top-level bullets.
+function parsePlan(text: string): Plan['steps'] {
+  const lines = text.split('\n')
+  const grab = (re: RegExp) => lines.flatMap(l => {
+    const m = re.exec(l)
+    return m ? [{ text: (m[2] ?? '').replace(/\*\*/g, '').trim(), isChecked: /x/i.test(m[1] ?? '') }] : []
+  }).filter(x => x.text)
+  const numbered = grab(/^\s{0,1}\d+[.)]\s+()(.+)$/)
+  if (numbered.length) return numbered.slice(0, 30)
+  const boxes = grab(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/)
+  if (boxes.length) return boxes.slice(0, 30)
+  return grab(/^[-*]\s+()(.+)$/).slice(0, 30)
+}
+const words = (t: string) => t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 3)
+// A step is done when a completed todo/task shares half of its words (or its box is checked).
+function stepState(step: Plan['steps'][number], list: Todo[]): 'done' | 'doing' | 'todo' {
+  if (step.isChecked) return 'done'
+  const ws = words(step.text)
+  if (!ws.length) return 'todo'
+  const match = (t: Todo) => { const tw = new Set(words(t.content)); return ws.filter(w => tw.has(w)).length / ws.length >= 0.5 }
+  if (list.some(t => t.status === 'completed' && match(t))) return 'done'
+  if (list.some(t => t.status === 'in_progress' && match(t))) return 'doing'
+  return 'todo'
+}
+
 // What a tool call is about, in a few words for the console.
 const detail = (e: Record<string, unknown>) => {
   const v = e.command ?? e.file_path ?? e.pattern ?? e.path ?? e.url ?? e.description ?? e.query ?? ''
@@ -91,10 +153,63 @@ function log($: EngineInterface, level: Level, text: string, isSub = false) {
   return update($, logs, list => [...list, { at: Date.now(), level, text, isSub }].slice(-MAX_LOGS))
 }
 
+async function board($: EngineInterface, tool: string, input: Record<string, unknown>, result: unknown) {
+  const res = (result ?? {}) as Record<string, unknown>
+  const now = Date.now()
+  if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
+    const path = String(res.filePath ?? input.file_path ?? input.notebook_path ?? '')
+    if (!path) return
+    let { add, del } = patchCount(res.structuredPatch as Patch | undefined)
+    const isNew = res.type === 'create'
+    if (isNew && add === 0) add = String(res.content ?? input.content ?? '').split('\n').length
+    if (tool === 'NotebookEdit' && add + del === 0) add = 1
+    await update($, touched, list => {
+      const old = list.find(f => f.path === path)
+      const one: Touched = old
+        ? { ...old, add: old.add + add, del: old.del + del, edits: old.edits + 1, at: now }
+        : { path, add, del, edits: 1, isNew, at: now }
+      return [...list.filter(f => f.path !== path), one].slice(-200)
+    })
+  } else if (tool === 'ExitPlanMode' && typeof res.plan === 'string') {
+    const steps = parsePlan(res.plan)
+    if (steps.length) await update($, plan, () => ({ at: now, steps }))
+  } else if (tool === 'TaskCreate') {
+    const t = res.task as { id?: string; subject?: string } | undefined
+    if (t?.id) await update($, todos, list => [...list.filter(x => x.id !== t.id), { id: t.id, content: t.subject ?? '', status: 'pending' }])
+  } else if (tool === 'TaskUpdate' && typeof input.taskId === 'string') {
+    const id = input.taskId, st = input.status as string | undefined, sub = input.subject as string | undefined
+    await update($, todos, list => (st === 'deleted'
+      ? list.filter(x => x.id !== id)
+      : list.map(x => (x.id === id ? { ...x, status: st ?? x.status, content: sub ?? x.content } : x))))
+  } else if ((tool === 'Bash' || tool === 'PowerShell') && typeof res.backgroundTaskId === 'string') {
+    const id = res.backgroundTaskId
+    await update($, bg, list => [...list.filter(b => b.id !== id), { id, kind: 'shell', desc: String(input.description ?? input.command ?? id).slice(0, 120), status: 'running', since: now }])
+  } else if (tool === 'Monitor' && typeof res.taskId === 'string') {
+    const id = res.taskId
+    await update($, bg, list => [...list.filter(b => b.id !== id), { id, kind: 'monitor', desc: String(input.description ?? id), status: 'running', since: now }])
+  } else if (tool === 'TaskStop') {
+    const id = String(input.task_id ?? input.shell_id ?? res.task_id ?? '')
+    await update($, bg, list => list.filter(b => b.id !== id))
+  } else if (tool === 'CronCreate' && typeof res.id === 'string') {
+    const c: Cron = {
+      id: res.id, schedule: String(res.humanSchedule ?? input.cron ?? ''), prompt: String(input.prompt ?? ''),
+      recurring: res.recurring === true, nextFireAt: typeof res.nextFireAt === 'number' ? res.nextFireAt : undefined,
+    }
+    await update($, crons, list => [...list.filter(x => x.id !== c.id), c])
+  } else if (tool === 'CronDelete') {
+    await update($, crons, list => list.filter(x => x.id !== input.id))
+  } else if (tool === 'CronList' && Array.isArray(res.jobs)) {
+    const jobs = res.jobs as { id: string; cron: string; humanSchedule: string; prompt: string; recurring?: boolean; nextFireAt?: number }[]
+    await update($, crons, () => jobs.map(j => ({ id: j.id, schedule: j.humanSchedule || j.cron, prompt: j.prompt, recurring: j.recurring === true, nextFireAt: j.nextFireAt })))
+  }
+}
+
 export const register: Register = on => {
   // Module vars rebuild on reload; they only label log lines.
   const names = new Map<string, string>()
   let modes: string[] = []
+  // ids of calls waiting on an ask; module memory so a plain call never touches state
+  const pending = new Set<string>()
 
 
   on('session.start', async ($, e, next) => {
@@ -178,6 +293,16 @@ export const register: Register = on => {
       const out = await run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
       pr = out || undefined
     }
+    if ((await read($, requests)).length === 0) {
+      const msgs = await $.session.messages().catch(() => [])
+      const seed: Request[] = []
+      for (const m of msgs) {
+        const text = m.text.replace(/\s+/g, ' ').trim()
+        if (m.role === 'user' && text && !text.startsWith('<')) seed.push({ text: text.slice(0, 200), tools: 0, isDone: true })
+        else if (m.role === 'assistant' && seed.length) seed[seed.length - 1]!.tools += m.toolUses.length
+      }
+      if (seed.length) await update($, requests, () => seed.slice(-50))
+    }
     const model = await $.session.model().catch(() => undefined)
     if (model) await update($, liveInfo, l => ({ ...l, model: l.model ?? model }))
     void prSample().then(gitSample)
@@ -225,6 +350,55 @@ export const register: Register = on => {
     return step.value
   })
 
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    if (!e.tool_use_id) return r // a plugin's query, not a call
+    const tool = String(e.tool)
+    const kind: GateKind = r.decision === 'allow' ? 'a' : r.decision === 'deny' ? 'd' : 'p'
+    const via = r.decision === 'ask'
+      ? (!r.plugin && modes.includes('auto') ? 'classifier' : 'person')
+      : r.rule ? 'rule' : r.setting ? 'setting' : r.hook ? 'hook' : 'mode'
+    if (kind === 'p') pending.add(e.tool_use_id)
+    const ev: GateEvent = {
+      id: e.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
+      detail: detail((e.input ?? {}) as Record<string, unknown>),
+      reason: r.reason, rule: r.rule, agent: e.agentId, isReadOnly: e.isReadOnly === true,
+    }
+    await update($, gate, g => {
+      const rules = r.rule
+        ? [...g.rules.filter(x => x.rule !== r.rule), { rule: r.rule, n: (g.rules.find(x => x.rule === r.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
+        : g.rules
+      return {
+        ...g,
+        events: [...g.events, ev].slice(-GATE_MAX),
+        total: g.total + 1,
+        counts: { ...g.counts, [kind]: g.counts[kind] + 1 },
+        cats: { ...g.cats, [ev.cat]: g.cats[ev.cat] + 1 },
+        reads: g.reads + (ev.isReadOnly ? 1 : 0),
+        writes: g.writes + (ev.isReadOnly ? 0 : 1),
+        main: g.main + (e.agentId ? 0 : 1),
+        forks: g.forks + (e.agentId ? 1 : 0),
+        rules,
+      }
+    })
+    return r
+  }).catch(($, e, next) => next(e)) // observer: fail open
+
+  on('classic.Stop', async ($, e, next) => {
+    const tasks = (e.background_tasks ?? []).filter(t => t.type !== 'subagent')
+    const now = Date.now()
+    await update($, bg, old => tasks.map(t => ({
+      id: t.id, kind: t.type, desc: t.description || t.command || t.id, status: t.status,
+      since: old.find(o => o.id === t.id)?.since ?? now,
+    })))
+    if (e.session_crons)
+      await update($, crons, old => (e.session_crons ?? []).map(c => ({
+        id: c.id, schedule: old.find(o => o.id === c.id)?.schedule ?? c.schedule, prompt: c.prompt, recurring: c.recurring,
+        nextFireAt: old.find(o => o.id === c.id)?.nextFireAt,
+      })))
+    return next(e)
+  }).catch(($, e, next) => next(e)) // observer: fail open
+
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
     await update($, liveInfo, l => ({ ...l, compactions: l.compactions + 1 }))
@@ -238,6 +412,8 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     if (e.text.trim()) await log($, 'USER', `you: ${e.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+    if (e.text.trim() && !e.command)
+      await update($, requests, list => [...list, { at: Date.now(), text: e.text.replace(/\s+/g, ' ').slice(0, 200), tools: 0, isDone: false }].slice(-50))
     return next(e)
   }).catch(($, e, next) => next(e)) // observer: fail open
 
@@ -252,11 +428,25 @@ export const register: Register = on => {
     const tool = String(e.tool)
     const who = e.agentId ? names.get(e.agentId) ?? 'fork' : 'main'
     if (tool === 'TodoWrite' && Array.isArray(raw.todos))
-      await update($, todos, () => (raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status })))
+      await update($, todos, list => [...list.filter(t => t.id), ...(raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status }))])
+    if (!e.agentId && (await read($, requests)).length)
+      await update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + 1 } : q)))
     if (e.agentId) await update($, forks, list => list.map(f => (f.id === e.agentId ? { ...f, tools: f.tools + 1 } : f)))
 
     const r = await next(e)
     const denied = 'deny' in r && r.deny !== undefined
+    if (!denied) await board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
+    const id = e.tool_use_id
+    // Only a call that waited on an ask writes here (keeps tool calls cheap).
+    if (pending.delete(id)) {
+      const rr = r as { isError?: boolean; text?: string }
+      // shortcut: no event says "the ask was refused"; an errored result worded as a refusal stands for it.
+      const refused = denied || (rr.isError === true && DENIAL.test(rr.text ?? ''))
+      await update($, gate, g => {
+        const ev = g.events.find(x => x.id === id && x.kind === 'p')
+        return ev ? settle(g, id, refused ? 'd' : ev.via === 'classifier' ? 'c' : 'h', Date.now()) : g
+      })
+    }
     const isError = !denied && (r as { isError?: boolean }).isError === true
     await log($, denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
       `${who}: ${tool} → ${denied ? `denied (${r.deny})` : detail(raw)}`, !!e.agentId)
@@ -271,6 +461,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (!e.agentId) await update($, liveInfo, l => ({ ...l, isBusy: false }))
+    if (!e.agentId)
+      await update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, isDone: true, durationMs: e.durationMs } : q)))
     const u = r.usage
     const cost = (await $.session.usage()).cost?.usd
     await update($, usage, old => ({
@@ -371,30 +563,107 @@ export const register: Register = on => {
         {back}
       </Box>)
     } else if (m === 'perms') {
-      const list = await read($, perms)
-      body = box('GATE PERMS — calls per tool', 1, <Box flexDirection="column">
-        {list.length === 0 && <Text dimColor>No tool calls yet.</Text>}
-        {list.slice(0, room).map(p => (
-          <Text wrap="truncate-end">{p.tool.padEnd(24).slice(0, 24)} <Text color="#5fd75f">✓ {p.ok}</Text>  <Text color={p.denied ? '#ff5f5f' : '#8a8a8a'}>✗ {p.denied}</Text></Text>
+      const [list, g] = await Promise.all([read($, perms), read($, gate)])
+      const cols = Math.max(10, W - 4)
+      const strip = g.events.slice(-cols * 2)
+      const rows = [strip.slice(0, Math.max(0, strip.length - cols)), strip.slice(-cols)].filter(x => x.length)
+      const sq = (k: GateKind, label: string, n: number) => <Text><Text color={GATE_COLOR[k]}>{k === 'd' ? '✗' : '■'}</Text> {n} {label}  </Text>
+      const avgWait = g.waits ? `${(g.waitMs / g.waits / 1000).toFixed(1)}s` : '—'
+      const recent = g.events.filter(x => x.kind !== 'a').slice(-Math.max(3, room - 16)).reverse()
+      const VIA: Record<string, string> = { c: 'classifier', h: 'approved', p: 'pending', d: 'denied' }
+      body = box('GATE PERMS', 1, <Box flexDirection="column">
+        <Box justifyContent="space-between">
+          <Text color="#5fd75f" bold>GATE · permissions</Text>
+          <Text dimColor>{g.total} checks</Text>
+        </Box>
+        {rows.length === 0 && <Text dimColor>No permission checks yet.</Text>}
+        {rows.map(r => <Text wrap="truncate-end">{r.map(x => <Text color={GATE_COLOR[x.kind]}>■</Text>)}</Text>)}
+        <Text wrap="wrap">{sq('a', 'allowed', g.counts.a)}{sq('c', 'classifier', g.counts.c)}{sq('h', 'approved', g.counts.h)}{sq('p', 'pending', g.counts.p)}{sq('d', 'denied', g.counts.d)}</Text>
+        <Text wrap="truncate-end"><Text bold>f:</Text> file {g.cats.f}  <Text bold>s:</Text> shell {g.cats.s}  <Text bold>o:</Text> other {g.cats.o}   <Text dimColor>read {g.reads} · write {g.writes}</Text></Text>
+        <Text wrap="truncate-end">main {g.main} · forks {g.forks}   <Text dimColor>avg approval wait</Text> {avgWait}   <Text dimColor>auto-approve rate</Text> {g.total ? Math.round(((g.counts.a + g.counts.c) / g.total) * 100) : 0}%</Text>
+        <Box flexDirection="row" marginTop={1}>
+          <Box flexDirection="column" flexGrow={1} minWidth={0}>
+            <Text color={CYAN} bold>TOP RULES</Text>
+            {g.rules.length === 0 && <Text dimColor>no rule decided yet</Text>}
+            {g.rules.slice(0, 5).map(x => <Text wrap="truncate-end"><Text dimColor>{String(x.n).padStart(4)}×</Text> {x.rule}</Text>)}
+          </Box>
+          <Box flexDirection="column" flexGrow={1} minWidth={0} marginLeft={2}>
+            <Text color={CYAN} bold>TOP TOOLS</Text>
+            {list.length === 0 && <Text dimColor>no tool calls yet</Text>}
+            {list.slice(0, 5).map(x => (
+              <Text wrap="truncate-end">{x.tool.padEnd(14).slice(0, 14)} <Text color="#5fd75f">✓{x.ok}</Text> <Text color={x.denied ? '#ff5f5f' : '#6c6c6c'}>✗{x.denied}</Text></Text>
+            ))}
+          </Box>
+        </Box>
+        <Text color={CYAN} bold>RECENT ASKS & DENIALS</Text>
+        {recent.length === 0 && <Text dimColor>nothing asked or denied yet</Text>}
+        {recent.map(x => (
+          <Text wrap="truncate-end"><Text color="#6c6c6c">[{hhmmss(x.at)}]</Text> <Text color={GATE_COLOR[x.kind]}>{VIA[x.kind]}</Text> {x.tool} <Text dimColor>{x.detail}</Text>{x.waitMs !== undefined ? <Text dimColor> · {(x.waitMs / 1000).toFixed(1)}s</Text> : ''}{x.reason && x.kind === 'd' ? <Text color="#ff875f"> — {x.reason}</Text> : ''}</Text>
         ))}
         {back}
       </Box>)
     } else if (m === 'board') {
-      const list = await read($, todos)
-      const col = (title: string, items: string[], color: string) => (
-        <Box flexDirection="column" flexGrow={1} minWidth={0} paddingX={1}>
-          <Text bold color={color}>{title} ({items.length})</Text>
-          {items.slice(0, room).map(t => <Text wrap="truncate-end">• {t}</Text>)}
-        </Box>
-      )
-      const by = (st: string[]) =>
-        list.length ? list.filter(t => st.includes(t.status)).map(t => t.content) : fl.filter(f => st.includes(f.status)).map(f => f.name)
-      body = box(list.length ? 'PROJECT BOARD — TodoWrite' : 'PROJECT BOARD — subagents', 1, <Box flexDirection="column">
-        <Box flexDirection="row">
-          {col('TODO', by(['pending', 'waiting', 'idle']), '#ffd75f')}
-          {col('DOING', by(['in_progress', 'running']), '#5fafff')}
-          {col('DONE', by(['completed']), '#5fd75f')}
-        </Box>
+      const [list, files, reqs, pl, bgs, cr, cwd] = await Promise.all([
+        read($, todos), read($, touched), read($, requests), read($, plan), read($, bg), read($, crons), $.session.cwd(),
+      ])
+      const isWide = W >= 110
+      const cap = Math.max(2, Math.floor((room - 8) / (isWide ? 3 : 5)))
+      const title = (t: string, extra?: string) => <Text color={CYAN} bold wrap="truncate-end">{t}{extra ? <Text dimColor bold={false}>  {extra}</Text> : ''}</Text>
+      const rel = (p: string) => (p.startsWith(cwd) ? p.slice(cwd.length).replace(/^[\\/]/, '') : p)
+
+      const states = (pl?.steps ?? []).map(st => stepState(st, list))
+      const done = states.filter(x => x === 'done').length
+      const tc = (st: string) => list.filter(t => t.status === st).length
+      const planSec = <Box flexDirection="column">
+        {title('PLAN', pl ? `${done}/${pl.steps.length}  ${'▰'.repeat(Math.round((done / Math.max(1, pl.steps.length)) * 10))}${'▱'.repeat(10 - Math.round((done / Math.max(1, pl.steps.length)) * 10))}` : undefined)}
+        {!pl && <Text dimColor>no approved plan yet</Text>}
+        {pl && pl.steps.slice(0, cap).map((st, k) => (
+          <Text wrap="truncate-end"><Text color={states[k] === 'done' ? '#5fd75f' : states[k] === 'doing' ? '#5fafff' : '#6c6c6c'}>{states[k] === 'done' ? '✓' : states[k] === 'doing' ? '◐' : '○'}</Text> <Text dimColor={states[k] === 'done'}>{st.text}</Text></Text>
+        ))}
+        {pl && pl.steps.length > cap && <Text dimColor>… +{pl.steps.length - cap} steps</Text>}
+        {list.length > 0 && <Text wrap="truncate-end" dimColor>tasks: <Text color="#ffd75f">{tc('pending')} todo</Text> · <Text color="#5fafff">{tc('in_progress')} doing</Text> · <Text color="#5fd75f">{tc('completed')} done</Text>{list.find(t => t.status === 'in_progress') ? `  ▸ ${list.find(t => t.status === 'in_progress')?.content}` : ''}</Text>}
+      </Box>
+
+      const fadd = files.reduce((n, f) => n + f.add, 0), fdel = files.reduce((n, f) => n + f.del, 0)
+      const filesSec = <Box flexDirection="column">
+        {title('FILES TOUCHED', files.length ? `${files.length} files  +${fadd} −${fdel}` : undefined)}
+        {files.length === 0 && <Text dimColor>no edits this session</Text>}
+        {[...files].sort((a, b) => b.at - a.at).slice(0, cap).map(f => (
+          <Text wrap="truncate-start"><Text color="#5fd75f">+{f.add}</Text> <Text color="#ff5f5f">−{f.del}</Text>{f.isNew ? <Text color="#ffd75f"> new</Text> : ''} {rel(f.path)}</Text>
+        ))}
+      </Box>
+
+      const timeSec = <Box flexDirection="column">
+        {title('TIMELINE', reqs.length ? `${reqs.length} requests` : undefined)}
+        {reqs.length === 0 && <Text dimColor>no requests yet</Text>}
+        {reqs.slice(-cap).reverse().map(q => (
+          <Text wrap="truncate-end"><Text color="#6c6c6c">{q.at ? hhmmss(q.at).slice(0, 5) : '--:--'}</Text> <Text color={q.isDone ? '#5fd75f' : '#ffd75f'}>{q.isDone ? '✓' : '◐'}</Text> <Text dimColor>{String(q.tools).padStart(3)} tools{q.durationMs !== undefined ? ` ${span(q.durationMs)}` : ''}</Text>  {q.text}</Text>
+        ))}
+      </Box>
+
+      const bgSec = <Box flexDirection="column">
+        {title('BACKGROUND', bgs.length ? `${bgs.length} running` : undefined)}
+        {bgs.length === 0 && <Text dimColor>no shells or monitors in flight</Text>}
+        {bgs.slice(0, cap).map(b => (
+          <Text wrap="truncate-end"><Text color="#5fd75f">●</Text> <Text color="#5fafff">{b.kind.padEnd(8)}</Text>{b.desc} <Text dimColor>{span(now - b.since)}</Text></Text>
+        ))}
+      </Box>
+
+      const cronSec = <Box flexDirection="column">
+        {title('SCHEDULED', cr.length ? `${cr.length} jobs` : undefined)}
+        {cr.length === 0 && <Text dimColor>nothing scheduled</Text>}
+        {cr.slice(0, cap).map(c => (
+          <Text wrap="truncate-end"><Text color="#ffd75f">⏰</Text> {c.schedule}{c.recurring ? '' : ' (once)'}  <Text dimColor>{c.prompt.replace(/\s+/g, ' ')}</Text>{c.nextFireAt ? <Text dimColor> · next {hhmmss(c.nextFireAt).slice(0, 5)}</Text> : ''}</Text>
+        ))}
+      </Box>
+
+      body = box('PROJECT BOARD', 1, <Box flexDirection="column">
+        {isWide
+          ? <Box flexDirection="row">
+              <Box flexDirection="column" flexGrow={1} minWidth={0}>{planSec}{filesSec}</Box>
+              <Box flexDirection="column" flexGrow={1} minWidth={0} marginLeft={2}>{timeSec}{bgSec}{cronSec}</Box>
+            </Box>
+          : <Box flexDirection="column">{planSec}{filesSec}{timeSec}{bgSec}{cronSec}</Box>}
         {back}
       </Box>)
     } else {
