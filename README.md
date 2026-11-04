@@ -82,8 +82,8 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Permission checks | `tool.check`; an ask's outcome when its call returns |
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |
-| CPU / RAM | one PowerShell CIM query every 10 s |
-| Git | `git status` every 5 s (30 s outside a repo), `git log` when HEAD moves, remote and `gh pr view` every 60 s |
+| CPU / RAM | one PowerShell CIM query every 15 s |
+| Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and `gh pr view` every 60 s |
 
 ### Limitations
 
@@ -95,7 +95,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 
 ## Performance
 
-Nothing the mod does holds a tool call or a model request. Logs and tool counts stay in memory and are written in one batch per second and at the end of each turn. Timers never overlap and they back off when idle. Every list kept in memory has a cap: 500 log lines, 300 permission checks, 200 files, 50 requests.
+Nothing the mod does holds a tool call or a model request. Per-call data (logs, tool counts, permission checks, MCP stats, fork counters) stays in memory; only what changed is written, in one batch per second and at the end of each turn. Timers never overlap and they back off when idle. Every list kept in memory has a cap: 500 log lines, 300 permission checks, 200 files, 50 requests.
 
 ## Develop
 
