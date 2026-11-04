@@ -233,7 +233,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'prodash' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', focus: true, columns: 999, rows: 40 })
-    return { text: 'Dashboard Pro aberto. Teclas 1–4 acionam a action bar.' }
+    return { text: 'Dashboard Pro opened. Keys 1–4 trigger the action bar.' }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -343,7 +343,7 @@ export const register: Register = on => {
       const list = await read($, logs)
       const path = `${await $.session.cwd()}/prodash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
       await $.fs.write(path, list.map(l => `[${hhmmss(l.at)}] [${l.level}] ${l.text}`).join('\n') + '\n')
-      $.ui.toast(`Log salvo: ${path}`)
+      $.ui.toast(`Log saved: ${path}`)
     }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
     const actions = (
@@ -356,24 +356,24 @@ export const register: Register = on => {
     )
 
     const room = Math.max(3, H - 14)
-    const back = <Button key="back" label="VOLTAR" onPress={() => update($, mode, () => 'main' as Mode)} />
+    const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
     if (m === 'agents') {
-      body = box('AGENT SELECT — abre o transcript do agente', 1, <Box flexDirection="column">
-        {fl.length === 0 && <Text dimColor>Nenhum sub-agente nesta sessão.</Text>}
+      body = box('AGENT SELECT — opens the agent transcript', 1, <Box flexDirection="column">
+        {fl.length === 0 && <Text dimColor>No subagents in this session.</Text>}
         {fl.slice(-room).map(f => (
           <Button key={`ag-${f.id}`} plain onPress={() => $.ui.view({ agentId: f.id })}>
             {f.name.slice(0, 40)} <Text color={STATUS_COLOR[f.status] ?? '#8a8a8a'}>({f.status.toUpperCase()})</Text> <Text dimColor>{f.tools} tools</Text>
           </Button>
         ))}
-        <Button key="main-view" plain onPress={() => $.ui.view({})}>← conversa principal</Button>
+        <Button key="main-view" plain onPress={() => $.ui.view({})}>← main conversation</Button>
         {back}
       </Box>)
     } else if (m === 'perms') {
       const list = await read($, perms)
-      body = box('GATE PERMS — chamadas por ferramenta', 1, <Box flexDirection="column">
-        {list.length === 0 && <Text dimColor>Nenhuma chamada de ferramenta ainda.</Text>}
+      body = box('GATE PERMS — calls per tool', 1, <Box flexDirection="column">
+        {list.length === 0 && <Text dimColor>No tool calls yet.</Text>}
         {list.slice(0, room).map(p => (
           <Text wrap="truncate-end">{p.tool.padEnd(24).slice(0, 24)} <Text color="#5fd75f">✓ {p.ok}</Text>  <Text color={p.denied ? '#ff5f5f' : '#8a8a8a'}>✗ {p.denied}</Text></Text>
         ))}
@@ -389,7 +389,7 @@ export const register: Register = on => {
       )
       const by = (st: string[]) =>
         list.length ? list.filter(t => st.includes(t.status)).map(t => t.content) : fl.filter(f => st.includes(f.status)).map(f => f.name)
-      body = box(list.length ? 'PROJECT BOARD — TodoWrite' : 'PROJECT BOARD — sub-agentes', 1, <Box flexDirection="column">
+      body = box(list.length ? 'PROJECT BOARD — TodoWrite' : 'PROJECT BOARD — subagents', 1, <Box flexDirection="column">
         <Box flexDirection="row">
           {col('TODO', by(['pending', 'waiting', 'idle']), '#ffd75f')}
           {col('DOING', by(['in_progress', 'running']), '#5fafff')}
@@ -403,14 +403,14 @@ export const register: Register = on => {
       const nStaged = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[0] !== '.').length
       const nMod = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[1] !== '.').length
       const nNew = g.files.filter(f => f.xy === '??').length
-      const gitBox = box(g.isRepo ? `GITHUB · ${g.repo ?? 'sem remote'}` : 'GITHUB', 0, g.isRepo ? <Box flexDirection="column">
-        <Text wrap="truncate-end">⎇ <Text color="#5fafff" bold>{g.branch ?? '?'}</Text>{g.upstream ? ` → ${g.upstream}` : ' (sem upstream)'} <Text color="#5fd75f">↑{g.ahead}</Text> <Text color="#ff875f">↓{g.behind}</Text>{g.stash ? `  stash ${g.stash}` : ''}</Text>
+      const gitBox = box(g.isRepo ? `GITHUB · ${g.repo ?? 'no remote'}` : 'GITHUB', 0, g.isRepo ? <Box flexDirection="column">
+        <Text wrap="truncate-end">⎇ <Text color="#5fafff" bold>{g.branch ?? '?'}</Text>{g.upstream ? ` → ${g.upstream}` : ' (no upstream)'} <Text color="#5fd75f">↑{g.ahead}</Text> <Text color="#ff875f">↓{g.behind}</Text>{g.stash ? `  stash ${g.stash}` : ''}</Text>
         {g.pr && <Text wrap="truncate-end">PR <Text color="#af87ff">{g.pr}</Text></Text>}
-        <Text wrap="truncate-end" dimColor>{g.last ?? 'sem commits'}</Text>
-        <Text wrap="truncate-end">PENDENTE: <Text color="#5fd75f">{nStaged} staged</Text> · <Text color="#ffd75f">{nMod} modif.</Text> · <Text color="#ff875f">{nNew} novos</Text>{g.files.length === 0 ? ' — limpo' : ''}</Text>
+        <Text wrap="truncate-end" dimColor>{g.last ?? 'no commits'}</Text>
+        <Text wrap="truncate-end">PENDING: <Text color="#5fd75f">{nStaged} staged</Text> · <Text color="#ffd75f">{nMod} modified</Text> · <Text color="#ff875f">{nNew} new</Text>{g.files.length === 0 ? ' — clean' : ''}</Text>
         {g.files.slice(0, fileRows).map((f: GitFile) => <Text wrap="truncate-start"><Text color={fileColor(f.xy)}>{f.xy.replace(/\./g, ' ')}</Text> {f.path}</Text>)}
-        {g.files.length > fileRows && <Text dimColor>… +{g.files.length - fileRows} arquivo(s)</Text>}
-      </Box> : <Text dimColor>Pasta atual não é um repositório git.</Text>)
+        {g.files.length > fileRows && <Text dimColor>… +{g.files.length - fileRows} file(s)</Text>}
+      </Box> : <Text dimColor>Current folder is not a git repository.</Text>)
       const gitRows = g.isRepo ? 4 + Math.min(fileRows + 1, g.files.length) + (g.pr ? 1 : 0) : 1
       const forkRoom = Math.max(2, room - gitRows - 3)
       // One row per loop: main first, then each fork; ● marks the one in view, a press opens its transcript.
