@@ -1,6 +1,6 @@
 # Claude ProDash
 
-A dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, cost, the git repository and the live subagents (forks). It also has views for permission checks and project progress.
+A dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, cost, the git repository and the live subagents (forks). It also has views for permission checks, project progress and color themes.
 
 ## Install
 
@@ -43,7 +43,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
 | **MCP Servers** | connected servers and tool count; per server: status, tools, calls, errors, average latency, last use; failed, pending, needs-auth and disabled servers with their error |
 | **Metrics** | session duration, total tokens, cost, last turn cost |
-| **Action Bar** | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board |
+| **Action Bar** | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
@@ -69,6 +69,13 @@ Press the key again, or **BACK**, to return to the main view.
 - **Timeline**: your requests with time, tool calls and duration.
 - **Background**: shells and monitors running in the background.
 - **Scheduled**: cron jobs and wakeups with their next run.
+
+**`5` Theme**: the dashboard's colors.
+- **Presets** (soft palettes): `default`, `matrix`, `dracula`, `nord`, `amber`, `cyberpunk`, `mono`, and `vivid` (bright colors).
+- **Custom**: starts from the last preset and lets you set each role (border, ok, warn, bad, info, accent, dim, text) from a list of colors or by typing `#rrggbb` + Enter. Changed roles show `*`; **RESET CUSTOM** undoes them.
+- The theme is saved across sessions.
+
+To type in the custom fields, open the pane with `/prodash` so it holds the keyboard.
 
 ## How it gets its data
 
