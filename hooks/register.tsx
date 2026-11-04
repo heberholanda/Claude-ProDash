@@ -203,6 +203,13 @@ const detail = (e: Record<string, unknown>) => {
   return String(v).replace(/\s+/g, ' ').slice(0, 80)
 }
 
+// A fork's current activity from its latest tool call: the tool and what it is about.
+function forkActivity(tool: string, input: Record<string, unknown>, task?: string) {
+  if (/^(Task|Todo)/.test(tool)) return task
+  const d = detail(input)
+  return (d ? `${tool.replace(/^mcp__/, '')} ${d}` : tool).slice(0, 120)
+}
+
 // Background work: a failure is dropped, never an unhandled rejection.
 function quiet(p: Promise<unknown>) {
   p.catch(() => undefined)
@@ -211,7 +218,8 @@ function quiet(p: Promise<unknown>) {
 // Per-call data lives in module memory; flushNow writes only the keys marked dirty, at most once a
 // second (flushSoon) and at the end of each turn. A plain tool call never writes state itself.
 type Dirty = 'perms' | 'gate' | 'mcp' | 'forks' | 'requests' | 'live'
-type ForkCount = { tools: number; lastIn: number; out: number }
+// act: what the fork is doing now; task: the activeForm of its task in progress, which wins over act.
+type ForkCount = { tools: number; lastIn: number; out: number; act?: string; task?: string }
 type McpStat = { calls: number; errors: number; totalMs: number; lastAt?: number }
 const logBuf: LogLine[] = []
 const permMap = new Map<string, Perm>()
@@ -249,7 +257,10 @@ function flushNow($: EngineInterface, withLogs = false) {
     for (const [name, st] of mcpStats) if (!out.some(x => x.name === name)) out.push({ ...blankServer(name, 'connected'), ...st })
     return out
   }))
-  if (keys.has('forks')) jobs.push(update($, forks, list => list.map(f => ({ ...f, ...forkCounts.get(f.id) }))))
+  if (keys.has('forks')) jobs.push(update($, forks, list => list.map(f => {
+    const c = forkCounts.get(f.id)
+    return c ? { ...f, tools: c.tools, lastIn: c.lastIn, out: c.out, act: c.task ?? c.act ?? f.act } : f
+  })))
   if (keys.has('requests')) {
     const n = reqTools
     reqTools = 0
@@ -380,7 +391,7 @@ export const register: Register = on => {
       read($, perms).then(v => { if (!permMap.size) for (const x of v) permMap.set(x.tool, x) }),
       read($, gate).then(v => { if (!gateMem.total) gateMem = v }),
       read($, mcp).then(v => { if (!mcpStats.size) for (const x of v) if (x.calls) mcpStats.set(x.name, { calls: x.calls, errors: x.errors, totalMs: x.totalMs, lastAt: x.lastAt }) }),
-      read($, forks).then(v => { for (const f of v) if (!forkCounts.has(f.id)) forkCounts.set(f.id, { tools: f.tools, lastIn: f.lastIn, out: f.out }) }),
+      read($, forks).then(v => { for (const f of v) if (!forkCounts.has(f.id)) forkCounts.set(f.id, { tools: f.tools, lastIn: f.lastIn, out: f.out, act: f.act }) }),
     ]).catch(() => undefined)
 
     // Agents: every 250ms while a fork is alive (spawn marks one at once), every 1s otherwise.
@@ -409,7 +420,7 @@ export const register: Register = on => {
         return list.map(a => {
           const old = byId.get(a.id)
           const c = forkCounts.get(a.id)
-          return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: c?.tools ?? old?.tools ?? 0, lastIn: c?.lastIn ?? old?.lastIn ?? 0, out: c?.out ?? old?.out ?? 0 }
+          return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: c?.tools ?? old?.tools ?? 0, lastIn: c?.lastIn ?? old?.lastIn ?? 0, out: c?.out ?? old?.out ?? 0, act: c?.task ?? c?.act ?? old?.act }
         })
       })
     }
@@ -658,7 +669,10 @@ export const register: Register = on => {
       reqTools++
       markDirty($, 'requests')
     } else {
-      forkCount(e.agentId).tools++
+      const fc = forkCount(e.agentId)
+      fc.tools++
+      fc.act = forkActivity(tool, raw, fc.task)
+      if (/^Task(Create|Update)$/.test(tool)) fc.task = raw.status === 'in_progress' && raw.activeForm ? String(raw.activeForm).slice(0, 120) : raw.status === 'completed' ? undefined : fc.task
       markDirty($, 'forks')
     }
 
@@ -1012,16 +1026,20 @@ export const register: Register = on => {
       // One row per loop: main first, then each fork; ● marks the one in view, a press opens its transcript.
       const viewed = e.props.view.agentId
       const rowW = Math.max(20, W - 4)
-      const row = (key: string, kind: string, name: string, right: string, isOn: boolean, isEnded: boolean, onPress: () => unknown) => {
+      const row = (key: string, kind: string, name: string, right: string, isOn: boolean, isEnded: boolean, onPress: () => unknown, act = '') => {
         // Time and tokens sit outside the Button with a fixed width, so a long name is what gets cut.
         const nameW = Math.max(4, rowW - 2 - 6 - right.length - 4)
         const shown = name.length > nameW ? `${name.slice(0, nameW - 1)}…` : name
+        // The activity takes what is left after the name.
+        const actW = nameW - shown.length - 3
+        const doing = act && actW >= 6 ? (act.length > actW ? `${act.slice(0, actW - 1)}…` : act) : ''
         return (
           <Box key={`r-${key}`} justifyContent="space-between">
             <Button key={key} plain onPress={onPress}>
               <Text color={tc(isOn ? '#ffffff' : '#8a8a8a')}>{isOn ? '●' : '○'} </Text>
               <Text bold={isOn} dimColor={!isOn}>{kind.padEnd(6)}</Text>
               <Text bold={isOn} dimColor={!isOn || isEnded}>{shown}</Text>
+              {doing && <Text color={tc('#6c6c6c')}> · {doing}</Text>}
             </Button>
             {right && <Box flexShrink={0} marginLeft={1}><Text dimColor={!isOn}>{right}</Text></Box>}
           </Box>
@@ -1034,6 +1052,7 @@ export const register: Register = on => {
           `${span(now - f.since)} · ↓ ${kTok1(f.lastIn + f.out)} tokens`,
           viewed === f.id, !LIVE.includes(f.status),
           () => $.ui.view({ agentId: f.id }),
+          LIVE.includes(f.status) ? f.act : '',
         ))}
       </Box>)
       body = <Box flexDirection="column">{gitBox}{forksBox}</Box>
