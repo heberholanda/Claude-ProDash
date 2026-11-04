@@ -27,7 +27,50 @@ export type Git = {
   pr?: string
   files: GitFile[]
 }
-export type Todo = { content: string; status: string }
+/** a: allowed by rule/mode, c: classifier approved, h: person approved, p: pending, d: denied */
+export type GateKind = 'a' | 'c' | 'h' | 'p' | 'd'
+export type GateVia = 'rule' | 'mode' | 'setting' | 'hook' | 'classifier' | 'person'
+export type GateEvent = {
+  id: string
+  at: number
+  tool: string
+  cat: 'f' | 's' | 'o'
+  kind: GateKind
+  via: GateVia
+  detail: string
+  reason?: string
+  rule?: string
+  agent?: string
+  isReadOnly: boolean
+  waitMs?: number
+}
+export type Gate = {
+  /** last 300 permission checks, oldest first */
+  events: GateEvent[]
+  /** all-time counters (events is capped) */
+  total: number
+  counts: Record<GateKind, number>
+  cats: { f: number; s: number; o: number }
+  reads: number
+  writes: number
+  main: number
+  forks: number
+  rules: { rule: string; n: number }[]
+  waitMs: number
+  waits: number
+}
+/** a TodoWrite item (no id) or a Task tool task (id) */
+export type Todo = { id?: string; content: string; status: string }
+/** a file edited this session through Edit/Write/MultiEdit/NotebookEdit */
+export type Touched = { path: string; add: number; del: number; edits: number; isNew: boolean; at: number }
+/** one user request of the main conversation */
+export type Request = { at?: number; text: string; tools: number; durationMs?: number; isDone: boolean }
+/** the latest approved plan (ExitPlanMode) */
+export type Plan = { at: number; steps: { text: string; isChecked: boolean }[] }
+/** a background shell, monitor or workflow */
+export type Bg = { id: string; kind: string; desc: string; status: string; since: number }
+/** a session cron / wakeup */
+export type Cron = { id: string; schedule: string; prompt: string; recurring: boolean; nextFireAt?: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -40,6 +83,12 @@ declare module 'claude-code' {
       perms: Shaped<Perm[]>
       todos: Shaped<Todo[]>
       git: Shaped<Git>
+      gate: Shaped<Gate>
+      touched: Shaped<Touched[]>
+      requests: Shaped<Request[]>
+      plan: Shaped<Plan | null>
+      bg: Shaped<Bg[]>
+      crons: Shaped<Cron[]>
       live: Shaped<Live>
     }
   }
