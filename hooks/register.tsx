@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Bg, Cron, Fork, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
+import type { Bg, Cron, Fork, McpServer, McpStatus, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
 
 const PANE = 'prodash'
 const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
@@ -25,6 +25,7 @@ const touched = atom({ plugin: 'prodash', key: 'touched' } as const, [] as Touch
 const requests = atom({ plugin: 'prodash', key: 'requests' } as const, [] as Request[], { shape: 'requests-1' })
 const plan = atom({ plugin: 'prodash', key: 'plan' } as const, null as Plan | null, { shape: 'plan-1' })
 const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 'bg-1' })
+const mcp = atom({ plugin: 'prodash', key: 'mcp' } as const, [] as McpServer[], { shape: 'mcp-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
 const STATUS_COLOR: Record<string, string> = {
@@ -143,6 +144,24 @@ function stepState(step: Plan['steps'][number], list: Todo[]): 'done' | 'doing' 
   return 'todo'
 }
 
+// mcp__<server>__<tool> -> <server>
+const mcpServer = (tool: string) => (tool.startsWith('mcp__') ? tool.slice(5).split('__')[0] ?? '' : '')
+const MCP_GLYPH: Record<McpStatus, [string, string]> = {
+  connected: ['●', '#5fd75f'], pending: ['◌', '#ffd75f'], failed: ['✗', '#ff5f5f'], 'needs-auth': ['⚿', '#ffaf00'], disabled: ['○', '#6c6c6c'],
+}
+const blankServer = (name: string, status: McpStatus): McpServer => ({ name, status, tools: 0, calls: 0, errors: 0, totalMs: 0 })
+// Set reported statuses (WaitForMcpServers / ToolSearch), adding servers not seen yet.
+function mcpMark(list: McpServer[], marks: [string, McpStatus, string?][]): McpServer[] {
+  const out = [...list]
+  for (const [name, status, error] of marks) {
+    const k = out.findIndex(x => x.name === name)
+    const one = { ...(k >= 0 ? out[k]! : blankServer(name, status)), status, ...(error ? { error } : {}) }
+    if (k >= 0) out[k] = one
+    else out.push(one)
+  }
+  return out
+}
+
 // What a tool call is about, in a few words for the console.
 const detail = (e: Record<string, unknown>) => {
   const v = e.command ?? e.file_path ?? e.pattern ?? e.path ?? e.url ?? e.description ?? e.query ?? ''
@@ -196,6 +215,23 @@ async function board($: EngineInterface, tool: string, input: Record<string, unk
       recurring: res.recurring === true, nextFireAt: typeof res.nextFireAt === 'number' ? res.nextFireAt : undefined,
     }
     await update($, crons, list => [...list.filter(x => x.id !== c.id), c])
+  } else if (tool === 'WaitForMcpServers') {
+    const r = res as { connected?: string[]; failed?: string[]; stillPending?: string[]; needsAuth?: string[]; disabled?: string[] }
+    const marks: [string, McpStatus][] = [
+      ...(r.connected ?? []).map(n => [n, 'connected'] as [string, McpStatus]),
+      ...(r.failed ?? []).map(n => [n, 'failed'] as [string, McpStatus]),
+      ...(r.stillPending ?? []).map(n => [n, 'pending'] as [string, McpStatus]),
+      ...(r.needsAuth ?? []).map(n => [n, 'needs-auth'] as [string, McpStatus]),
+      ...(r.disabled ?? []).map(n => [n, 'disabled'] as [string, McpStatus]),
+    ]
+    if (marks.length) await update($, mcp, list => mcpMark(list, marks))
+  } else if (tool === 'ToolSearch' && (res.pending_mcp_servers || res.failed_mcp_servers)) {
+    const pend = (res.pending_mcp_servers ?? []) as string[]
+    const fail = (res.failed_mcp_servers ?? []) as { name: string; error?: string; errorCode?: string }[]
+    await update($, mcp, list => mcpMark(list, [
+      ...pend.map(n => [n, 'pending'] as [string, McpStatus]),
+      ...fail.map(f => [f.name, 'failed', f.error ?? f.errorCode] as [string, McpStatus, string?]),
+    ]))
   } else if (tool === 'CronDelete') {
     await update($, crons, list => list.filter(x => x.id !== input.id))
   } else if (tool === 'CronList' && Array.isArray(res.jobs)) {
@@ -303,6 +339,22 @@ export const register: Register = on => {
       }
       if (seed.length) await update($, requests, () => seed.slice(-50))
     }
+    const mcpSample = async () => {
+      const tools = await $.tool.list().catch(() => undefined)
+      if (!tools) return
+      const count = new Map<string, number>()
+      for (const t of tools) if (t.mcp || t.name.startsWith('mcp__')) {
+        const name = mcpServer(t.name)
+        if (name) count.set(name, (count.get(name) ?? 0) + 1)
+      }
+      const old = await read($, mcp)
+      const fresh: McpServer[] = [...count].map(([name, n]) => ({ ...(old.find(x => x.name === name) ?? blankServer(name, 'connected')), status: 'connected', tools: n, error: undefined }))
+      // keep reported non-connected servers (failed, pending...) that have no tools
+      for (const x of old) if (!count.has(x.name) && x.status !== 'connected') fresh.push(x)
+      if (JSON.stringify(fresh) !== JSON.stringify(old)) await update($, mcp, () => fresh)
+    }
+    void mcpSample()
+    $.clock.every(30000, () => void mcpSample())
     const model = await $.session.model().catch(() => undefined)
     if (model) await update($, liveInfo, l => ({ ...l, model: l.model ?? model }))
     void prSample().then(gitSample)
@@ -433,8 +485,18 @@ export const register: Register = on => {
       await update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + 1 } : q)))
     if (e.agentId) await update($, forks, list => list.map(f => (f.id === e.agentId ? { ...f, tools: f.tools + 1 } : f)))
 
+    const t0 = Date.now()
     const r = await next(e)
     const denied = 'deny' in r && r.deny !== undefined
+    const srv = mcpServer(tool)
+    if (srv) {
+      const ms = Date.now() - t0, failed = denied || (r as { isError?: boolean }).isError === true
+      await update($, mcp, list => {
+        const one = list.find(x => x.name === srv) ?? blankServer(srv, 'connected')
+        const upd = { ...one, calls: one.calls + 1, errors: one.errors + (failed ? 1 : 0), totalMs: one.totalMs + ms, lastAt: Date.now() }
+        return list.some(x => x.name === srv) ? list.map(x => (x.name === srv ? upd : x)) : [...list, upd]
+      })
+    }
     if (!denied) await board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
     const id = e.tool_use_id
     // Only a call that waited on an ask writes here (keeps tool calls cheap).
@@ -484,7 +546,7 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const W = e.props.bodyColumns
     const H = Math.max(12, e.viewport?.rows ?? 30)
-    const [s, u, fl, m, lv, gh] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git)])
+    const [s, u, fl, m, lv, gh, servers] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp)])
     const live = fl.filter(f => LIVE.includes(f.status))
     const count = (st: string) => live.filter(f => f.status === st).length
     const running = count('running'), waiting = count('waiting') + count('pending'), idle = count('idle')
@@ -547,7 +609,26 @@ export const register: Register = on => {
       </Box>
     )
 
-    const room = Math.max(3, H - 14)
+    const MCP_ROWS = 5
+    const shownMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || b.calls - a.calls).slice(0, MCP_ROWS)
+    const nConn = servers.filter(x => x.status === 'connected').length
+    const nTools = servers.reduce((n, x) => n + x.tools, 0)
+    const nBad = servers.filter(x => x.status === 'failed' || x.status === 'needs-auth').length
+    const mcpBox = box('MCP SERVERS', 0, <Box flexDirection="column">
+      <Text wrap="truncate-end"><Text color="#5fd75f">{nConn} connected</Text> · {nTools} tools{nBad ? <Text color="#ff5f5f"> · {nBad} failing</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color="#ffd75f"> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+      {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
+      {shownMcp.map(x => {
+        const [g, c] = MCP_GLYPH[x.status]
+        return (
+          <Box key={`mcp-${x.name}`} justifyContent="space-between">
+            <Text wrap="truncate-end"><Text color={c}>{g}</Text> {x.name} <Text dimColor>{x.status === 'connected' ? `${x.tools} tools` : x.status}</Text>{x.error ? <Text color="#ff875f"> — {x.error}</Text> : ''}</Text>
+            <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text></Box>
+          </Box>
+        )
+      })}
+      {servers.length > MCP_ROWS && <Text dimColor>… +{servers.length - MCP_ROWS} servers</Text>}
+    </Box>)
+    const room = Math.max(3, H - 14 - 3 - Math.max(1, shownMcp.length) - (servers.length > MCP_ROWS ? 1 : 0))
     const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
@@ -715,6 +796,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={W}>
         {header}
+        {mcpBox}
         {actions}
         {body}
       </Box>
