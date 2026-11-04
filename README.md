@@ -30,6 +30,8 @@ The pane opens by itself on wide terminals (144+ columns); `/prodash` opens it a
 | Agent Overview | model · branch, busy/idle, effort, mode, request count, context window, cost, 5h/7d rate limits, last request TTFT, agent counters |
 | Session Metrics | duration, tokens, cost, last turn cost |
 | Action Bar | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board |
+| Gate Perms | every permission check as a color strip; allowed / classifier / approved / pending / denied; file · shell · other; read vs write; main vs forks; avg approval wait; top rules; top tools; recent asks and denials |
+| Project Board | approved plan progress, files touched with +/- lines, request timeline, background shells and monitors, scheduled jobs |
 | GitHub | repo, branch → upstream, ahead/behind, stash, PR (needs `gh`), last commit, files pending commit |
 | Active Forks | each subagent's status, tool calls and elapsed time |
 
