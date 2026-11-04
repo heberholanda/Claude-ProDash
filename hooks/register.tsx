@@ -10,7 +10,7 @@ const HIST = 24
 const logs = atom({ plugin: 'prodash', key: 'logs' } as const, [] as LogLine[], { shape: 'logs-1' })
 const forks = atom({ plugin: 'prodash', key: 'forks' } as const, [] as Fork[], { shape: 'forks-2' })
 const sys = atom({ plugin: 'prodash', key: 'sys' } as const, { hist: [] } as Sys, { shape: 'sys-1' })
-const usage = atom({ plugin: 'prodash', key: 'usage' } as const, { startedAt: 0, tokens: 0, ctxHist: [] } as Usage, { shape: 'usage-1' })
+const usage = atom({ plugin: 'prodash', key: 'usage' } as const, { startedAt: 0, tokens: 0 } as Usage, { shape: 'usage-2' })
 const mode = atom({ plugin: 'prodash', key: 'mode' } as const, 'main' as Mode)
 const perms = atom({ plugin: 'prodash', key: 'perms' } as const, [] as Perm[], { shape: 'perms-1' })
 const git = atom({ plugin: 'prodash', key: 'git' } as const, { isRepo: false, ahead: 0, behind: 0, stash: 0, files: [] } as Git, { shape: 'git-1' })
@@ -168,8 +168,45 @@ const detail = (e: Record<string, unknown>) => {
   return String(v).replace(/\s+/g, ' ').slice(0, 80)
 }
 
-function log($: EngineInterface, level: Level, text: string, isSub = false) {
-  return update($, logs, list => [...list, { at: Date.now(), level, text, isSub }].slice(-MAX_LOGS))
+// Background work: a failure is dropped, never an unhandled rejection.
+function quiet(p: Promise<unknown>) {
+  p.catch(() => undefined)
+}
+
+// Gate writes run one after another so a check and its outcome never race.
+let gateQ: Promise<unknown> = Promise.resolve()
+function gateWrite($: EngineInterface, fn: (g: Gate) => Gate) {
+  gateQ = gateQ.then(() => update($, gate, fn)).catch(() => undefined)
+  return gateQ
+}
+
+// Hot-path data kept in module memory and written to state in batches (flushSoon / turn.complete).
+const logBuf: LogLine[] = []
+const permMap = new Map<string, Perm>()
+let flushQueued = false
+
+function log(_$: EngineInterface, level: Level, text: string, isSub = false) {
+  logBuf.push({ at: Date.now(), level, text, isSub })
+  if (logBuf.length > MAX_LOGS) logBuf.splice(0, logBuf.length - MAX_LOGS)
+}
+function countTool(tool: string, denied: boolean) {
+  const one = permMap.get(tool) ?? { tool, ok: 0, denied: 0 }
+  permMap.set(tool, { ...one, ok: one.ok + (denied ? 0 : 1), denied: one.denied + (denied ? 1 : 0) })
+}
+function flushNow($: EngineInterface) {
+  return Promise.all([
+    update($, logs, () => logBuf.slice()),
+    update($, perms, () => [...permMap.values()].sort((a, b) => b.ok + b.denied - a.ok - a.denied)),
+  ])
+}
+// At most one batch write per second while tools run.
+function flushSoon($: EngineInterface) {
+  if (flushQueued) return
+  flushQueued = true
+  $.clock.after(1000, () => {
+    flushQueued = false
+    quiet(flushNow($))
+  })
 }
 
 async function board($: EngineInterface, tool: string, input: Record<string, unknown>, result: unknown) {
@@ -244,57 +281,82 @@ export const register: Register = on => {
   // Module vars rebuild on reload; they only label log lines.
   const names = new Map<string, string>()
   let modes: string[] = []
-  // ids of calls waiting on an ask; module memory so a plain call never touches state
-  const pending = new Set<string>()
+  // ids of calls waiting on an ask (-> when asked); module memory so a plain call never touches state
+  const pending = new Map<string, number>()
+  // last status seen per agent: the poll diffs against this instead of reading state
+  const forkStatus = new Map<string, string>()
+  let sessionCwd = ''
+  let lastUsageKey = ''
+  let lastStatus = ''
 
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'prodash', description: 'Open the Dashboard Pro pane' })
     await update($, usage, u => ({ ...u, startedAt: Date.now() }))
+    sessionCwd = await $.session.cwd()
+    if (logBuf.length === 0) logBuf.push(...(await read($, logs)))
+    if (permMap.size === 0) for (const p of await read($, perms)) permMap.set(p.tool, p)
 
-    // Agents + session usage: cheap engine reads, polled fast (<200ms latency target).
-    $.clock.every(150, async () => {
+    // Agents: every 250ms while a fork is alive (spawn marks one at once), every 1s otherwise.
+    let tick = 0
+    $.clock.every(250, async () => {
+      const anyLive = [...forkStatus.values()].some(st => LIVE.includes(st))
+      if (!anyLive && tick++ % 4) return
       const list = await $.agent.list()
-      const now = Date.now()
-      const prev = await read($, forks)
-      const fresh: Fork[] = list.map(a => {
+      const changed = list.length !== forkStatus.size || list.some(a => forkStatus.get(a.id) !== a.status)
+      if (!changed) return
+      for (const a of list) {
         names.set(a.id, a.description || a.name || a.type)
-        const old = prev.find(f => f.id === a.id)
-        if (old && old.status !== a.status && (a.status === 'failed' || a.status === 'killed'))
-          void log($, a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
-        if (old && old.status !== a.status && a.status === 'completed')
-          void log($, 'SUCCESS', `${names.get(a.id)}: completed`, true)
+        const was = forkStatus.get(a.id)
+        if (was && was !== a.status && (a.status === 'failed' || a.status === 'killed'))
+          log($, a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
+        if (was && was !== a.status && a.status === 'completed') log($, 'SUCCESS', `${names.get(a.id)}: completed`, true)
+      }
+      forkStatus.clear()
+      for (const a of list) forkStatus.set(a.id, a.status)
+      const now = Date.now()
+      // merge into the current value so concurrent tools/tokens increments are kept
+      await update($, forks, cur => list.map(a => {
+        const old = cur.find(f => f.id === a.id)
         return { id: a.id, name: names.get(a.id) ?? a.id, status: a.status, since: old?.since ?? now, tools: old?.tools ?? 0, lastIn: old?.lastIn ?? 0, out: old?.out ?? 0 }
-      })
-      if (JSON.stringify(fresh.map(f => [f.id, f.status])) !== JSON.stringify(prev.map(f => [f.id, f.status])))
-        await update($, forks, () => fresh)
+      }))
     })
 
+    // Usage: write only when a figure changed; otherwise just redraw so the clocks tick.
     $.clock.every(1000, async () => {
       const u = await $.session.usage()
       const ctx = u.context.percent
-      await update($, usage, old => ({
-        ...old,
-        startedAt: u.startedAt || old.startedAt,
-        ctx,
-        ctxTokens: u.context.tokens,
-        ctxWindow: u.context.window,
-        limits: u.rateLimits.map(r => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt })),
-        usd: u.cost?.usd,
-        ctxHist: push(old.ctxHist, ctx ?? 0),
-      }))
-      const live = (await read($, forks)).filter(f => LIVE.includes(f.status))
-      const running = live.filter(f => f.status === 'running').length
-      $.ui.status(`prodash: ctx ${ctx ?? 0}% · agents ${running}/${live.length}`)
+      const key = JSON.stringify([u.startedAt, ctx, u.context.tokens, u.context.window, u.rateLimits, u.cost?.usd])
+      if (key !== lastUsageKey) {
+        lastUsageKey = key
+        await update($, usage, old => ({
+          ...old,
+          startedAt: u.startedAt || old.startedAt,
+          ctx,
+          ctxTokens: u.context.tokens,
+          ctxWindow: u.context.window,
+          limits: u.rateLimits.map(r => ({ kind: r.kind, pct: r.percentUsed, resetsAt: r.resetsAt })),
+          usd: u.cost?.usd,
+        }))
+      } else $.ui.invalidate('ui.render')
+      const live = [...forkStatus.values()].filter(st => LIVE.includes(st))
+      const text = `prodash: ctx ${ctx ?? 0}% · agents ${live.filter(st => st === 'running').length}/${live.length}`
+      if (text !== lastStatus) {
+        lastStatus = text
+        $.ui.status(text)
+      }
     })
 
     // System load: Windows via CIM. shortcut: Windows only, add /proc or vm_stat for other OSes.
+    let sysBusy = false
     const sample = async () => {
+      if (sysBusy) return
+      sysBusy = true
       const r = await $.process.run(
         ['powershell', '-NoProfile', '-Command',
           '$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"'],
         { timeoutMs: 8000 },
-      ).catch(() => undefined)
+      ).catch(() => undefined).finally(() => { sysBusy = false })
       const [c, total, free] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
       if (c === undefined || Number.isNaN(c)) return
       await update($, sys, s => ({
@@ -304,30 +366,47 @@ export const register: Register = on => {
         hist: push(s.hist, c),
       }))
     }
-    void sample()
-    $.clock.every(5000, () => void sample())
+    quiet(sample())
+    // shortcut: one short-lived PowerShell per sample; a long-lived streaming process would cost less CPU.
+    $.clock.every(10000, () => quiet(sample()))
 
-    // Git: local reads every 5s; the PR (network, needs gh) every 60s.
-    const cwd = await $.session.cwd()
+    // Git: status every 5s (30s outside a repo); log only when HEAD moves; remote + PR every 60s.
+    const cwd = sessionCwd
     const run = (argv: string[]) =>
       $.process.run(argv, { cwd, timeoutMs: 8000 }).then(r => (r.exitCode === 0 ? r.stdout.trim() : undefined), () => undefined)
     let pr: string | undefined
+    let repo: string | undefined
+    let gitBusy = false, gitTick = 0, isRepo = true, lastOid = '', last: string | undefined, lastGit = ''
     const gitSample = async () => {
-      const [st, last, remote] = await Promise.all([
-        run(['git', 'status', '--porcelain=v2', '--branch', '--show-stash']),
-        run(['git', 'log', '-1', '--format=%h %s (%cr)']),
-        run(['git', 'remote', 'get-url', 'origin']),
-      ])
-      const g: Git = st === undefined ? { isRepo: false, ahead: 0, behind: 0, stash: 0, files: [] } : parseStatus(st)
-      g.last = last || undefined
-      g.repo = remote?.replace(/\.git$/, '').replace(/^.*[:/]([^/:]+\/[^/]+)$/, '$1')
-      g.pr = pr
-      const old = await read($, git)
-      if (JSON.stringify(old) !== JSON.stringify(g)) await update($, git, () => g)
+      if (gitBusy || (!isRepo && gitTick++ % 6)) return
+      gitBusy = true
+      try {
+        const st = await run(['git', 'status', '--porcelain=v2', '--branch', '--show-stash'])
+        isRepo = st !== undefined
+        const oid = /^# branch\.oid (\S+)/m.exec(st ?? '')?.[1] ?? ''
+        if (oid !== lastOid) {
+          lastOid = oid
+          last = oid && oid !== '(initial)' ? await run(['git', 'log', '-1', '--format=%h %s (%cr)']) : undefined
+        }
+        const g: Git = st === undefined ? { isRepo: false, ahead: 0, behind: 0, stash: 0, files: [] } : parseStatus(st)
+        g.last = last || undefined
+        g.repo = repo
+        g.pr = pr
+        const json = JSON.stringify(g)
+        if (json !== lastGit) {
+          lastGit = json
+          await update($, git, () => g)
+        }
+      } finally {
+        gitBusy = false
+      }
     }
     const prSample = async () => {
-      const out = await run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
+      const remote = isRepo ? await run(['git', 'remote', 'get-url', 'origin']) : undefined
+      repo = remote?.replace(/\.git$/, '').replace(/^.*[:/]([^/:]+\/[^/]+)$/, '$1')
+      const out = repo ? await run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}']) : undefined
       pr = out || undefined
+      lastOid = '' // let the next status re-read the last commit (it may say "(5 minutes ago)")
     }
     if ((await read($, requests)).length === 0) {
       const msgs = await $.session.messages().catch(() => [])
@@ -353,13 +432,13 @@ export const register: Register = on => {
       for (const x of old) if (!count.has(x.name) && x.status !== 'connected') fresh.push(x)
       if (JSON.stringify(fresh) !== JSON.stringify(old)) await update($, mcp, () => fresh)
     }
-    void mcpSample()
-    $.clock.every(30000, () => void mcpSample())
+    quiet(mcpSample())
+    $.clock.every(30000, () => quiet(mcpSample()))
     const model = await $.session.model().catch(() => undefined)
     if (model) await update($, liveInfo, l => ({ ...l, model: l.model ?? model }))
-    void prSample().then(gitSample)
-    $.clock.every(5000, () => void gitSample())
-    $.clock.every(60000, () => void prSample())
+    quiet(prSample().then(gitSample))
+    $.clock.every(5000, () => quiet(gitSample()))
+    $.clock.every(60000, () => quiet(prSample()))
 
     void $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', columns: 999, rows: 40 })
     return next(e)
@@ -367,18 +446,18 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     const r = await next(e)
-    await update($, liveInfo, l => ({ ...l, isBusy: true }))
+    quiet(update($, liveInfo, l => ({ ...l, isBusy: true })))
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
   // Each model request: count it, note model/effort, time its first chunk (TTFT).
   on('turn.step', async function* ($, e, next) {
     const t0 = Date.now()
-    await update($, liveInfo, l => ({
+    quiet(update($, liveInfo, l => ({
       ...l,
       reqs: l.reqs + 1,
       ...(e.agentId ? {} : { model: e.model, effort: e.effort === undefined ? l.effort : String(e.effort) }),
-    }))
+    })))
     const it = next(e)
     let first = true
     let step = await it.next()
@@ -386,15 +465,15 @@ export const register: Register = on => {
       if (first && !e.agentId) {
         first = false
         const ttftMs = Date.now() - t0
-        void update($, liveInfo, l => ({ ...l, ttftMs }))
+        quiet(update($, liveInfo, l => ({ ...l, ttftMs })))
       }
       const c = step.value as { kind?: string; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | null }
       if (e.agentId && c.kind === 'stop' && c.usage) {
         const u = c.usage
         const id = e.agentId
-        void update($, forks, list => list.map(f => (f.id === id
+        quiet(update($, forks, list => list.map(f => (f.id === id
           ? { ...f, lastIn: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens, out: f.out + u.output_tokens }
-          : f)))
+          : f))))
       }
       yield step.value
       step = await it.next()
@@ -410,13 +489,13 @@ export const register: Register = on => {
     const via = r.decision === 'ask'
       ? (!r.plugin && modes.includes('auto') ? 'classifier' : 'person')
       : r.rule ? 'rule' : r.setting ? 'setting' : r.hook ? 'hook' : 'mode'
-    if (kind === 'p') pending.add(e.tool_use_id)
+    if (kind === 'p') pending.set(e.tool_use_id, Date.now())
     const ev: GateEvent = {
       id: e.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
       detail: detail((e.input ?? {}) as Record<string, unknown>),
       reason: r.reason, rule: r.rule, agent: e.agentId, isReadOnly: e.isReadOnly === true,
     }
-    await update($, gate, g => {
+    gateWrite($, g => {
       const rules = r.rule
         ? [...g.rules.filter(x => x.rule !== r.rule), { rule: r.rule, n: (g.rules.find(x => x.rule === r.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
         : g.rules
@@ -463,15 +542,17 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (e.text.trim()) await log($, 'USER', `you: ${e.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+    if (e.text.trim()) log($, 'USER', `you: ${e.text.replace(/\s+/g, ' ').slice(0, 120)}`)
     if (e.text.trim() && !e.command)
-      await update($, requests, list => [...list, { at: Date.now(), text: e.text.replace(/\s+/g, ' ').slice(0, 200), tools: 0, isDone: false }].slice(-50))
+      quiet(update($, requests, list => [...list, { at: Date.now(), text: e.text.replace(/\s+/g, ' ').slice(0, 200), tools: 0, isDone: false }].slice(-50)))
     return next(e)
   }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('agent.spawn', async ($, e, next) => {
     const r = await next(e)
-    await log($, 'INFO', `${String((e as { description?: string }).description ?? 'agent')}: spawned → fork`)
+    log($, 'INFO', `${String((e as { description?: string }).description ?? 'agent')}: spawned → fork`)
+    const id = (r as { agentId?: string }).agentId
+    if (id && !forkStatus.has(id)) forkStatus.set(id, 'pending')
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
@@ -480,10 +561,9 @@ export const register: Register = on => {
     const tool = String(e.tool)
     const who = e.agentId ? names.get(e.agentId) ?? 'fork' : 'main'
     if (tool === 'TodoWrite' && Array.isArray(raw.todos))
-      await update($, todos, list => [...list.filter(t => t.id), ...(raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status }))])
-    if (!e.agentId && (await read($, requests)).length)
-      await update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + 1 } : q)))
-    if (e.agentId) await update($, forks, list => list.map(f => (f.id === e.agentId ? { ...f, tools: f.tools + 1 } : f)))
+      quiet(update($, todos, list => [...list.filter(t => t.id), ...(raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status }))]))
+    if (!e.agentId) quiet(update($, requests, list => (list.length ? list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, tools: q.tools + 1 } : q)) : list)))
+    if (e.agentId) quiet(update($, forks, list => list.map(f => (f.id === e.agentId ? { ...f, tools: f.tools + 1 } : f))))
 
     const t0 = Date.now()
     const r = await next(e)
@@ -491,49 +571,50 @@ export const register: Register = on => {
     const srv = mcpServer(tool)
     if (srv) {
       const ms = Date.now() - t0, failed = denied || (r as { isError?: boolean }).isError === true
-      await update($, mcp, list => {
+      quiet(update($, mcp, list => {
         const one = list.find(x => x.name === srv) ?? blankServer(srv, 'connected')
         const upd = { ...one, calls: one.calls + 1, errors: one.errors + (failed ? 1 : 0), totalMs: one.totalMs + ms, lastAt: Date.now() }
         return list.some(x => x.name === srv) ? list.map(x => (x.name === srv ? upd : x)) : [...list, upd]
-      })
+      }))
     }
-    if (!denied) await board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
+    if (!denied) void board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
     const id = e.tool_use_id
     // Only a call that waited on an ask writes here (keeps tool calls cheap).
     if (pending.delete(id)) {
       const rr = r as { isError?: boolean; text?: string }
       // shortcut: no event says "the ask was refused"; an errored result worded as a refusal stands for it.
       const refused = denied || (rr.isError === true && DENIAL.test(rr.text ?? ''))
-      await update($, gate, g => {
+      await gateWrite($, g => {
         const ev = g.events.find(x => x.id === id && x.kind === 'p')
         return ev ? settle(g, id, refused ? 'd' : ev.via === 'classifier' ? 'c' : 'h', Date.now()) : g
       })
     }
     const isError = !denied && (r as { isError?: boolean }).isError === true
-    await log($, denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
+    log($, denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
       `${who}: ${tool} → ${denied ? `denied (${r.deny})` : detail(raw)}`, !!e.agentId)
-    await update($, perms, list => {
-      const one = list.find(p => p.tool === tool) ?? { tool, ok: 0, denied: 0 }
-      const upd = { ...one, ok: one.ok + (denied ? 0 : 1), denied: one.denied + (denied ? 1 : 0) }
-      return [...list.filter(p => p.tool !== tool), upd].sort((a, b) => b.ok + b.denied - a.ok - a.denied)
-    })
+    countTool(tool, denied)
+    flushSoon($)
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (!e.agentId) await update($, liveInfo, l => ({ ...l, isBusy: false }))
-    if (!e.agentId)
-      await update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, isDone: true, durationMs: e.durationMs } : q)))
     const u = r.usage
     const cost = (await $.session.usage()).cost?.usd
-    await update($, usage, old => ({
+    const old15 = Date.now() - 15 * 60_000
+    for (const [id, at] of pending) if (at < old15) pending.delete(id)
+    await Promise.all([
+      flushNow($),
+      e.agentId ? undefined : update($, liveInfo, l => ({ ...l, isBusy: false })),
+      e.agentId ? undefined : update($, requests, list => list.map((q, i) => (i === list.length - 1 && !q.isDone ? { ...q, isDone: true, durationMs: e.durationMs } : q))),
+      update($, usage, old => ({
       ...old,
       tokens: old.tokens + (u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0),
       lastTurnUsd: cost !== undefined && old.usd !== undefined ? Math.max(0, cost - (old.turnBaseUsd ?? 0)) : old.lastTurnUsd,
       turnBaseUsd: cost,
       usd: cost,
-    }))
+    })),
+    ])
     return r
   })
 
@@ -551,18 +632,30 @@ export const register: Register = on => {
     const count = (st: string) => live.filter(f => f.status === st).length
     const running = count('running'), waiting = count('waiting') + count('pending'), idle = count('idle')
     const now = Date.now()
-    const box = (title: string, grow: number, body: RenderChildren) => (
-      <Box flexDirection="column" borderStyle="round" borderColor={CYAN} paddingX={1} flexGrow={grow} minWidth={0}>
-        <Text color={CYAN} bold wrap="truncate-end">{title}</Text>
-        {body}
-      </Box>
-    )
+    // w: the box's outer width in cells, so its title can be centered on the top border
+    const box = (title: string, grow: number, body: RenderChildren, w = W) => {
+      const t = title.slice(0, Math.max(1, w - 6))
+      const left = Math.max(1, Math.floor((w - (t.length + 2)) / 2))
+      // The title is painted over the top border from a borderless wrapper (row 0 of the wrapper is
+      // the border row): the terminal clips what a bordered box draws outside its own content.
+      return (
+        <Box flexDirection="column" flexGrow={grow} width={w === W ? undefined : w} flexShrink={0} minWidth={0}>
+          <Box flexDirection="column" borderStyle="round" borderColor={CYAN} paddingX={1} flexGrow={1} minWidth={0}>
+            {body}
+          </Box>
+          <Box position="absolute" top={0} left={left} width={t.length + 2}>
+            <Text wrap="truncate-end"><Text> </Text><Text color={CYAN} bold>{t}</Text><Text> </Text></Text>
+          </Box>
+        </Box>
+      )
+    }
+    const wThird = Math.floor(W / 3)
     const load = s.load ?? 0
     const status = s.load === undefined ? 'SYNCING' : load >= 90 ? 'DEGRADED' : 'ONLINE'
     const histo = live.map(f => (f.status === 'running' ? '■' : '□')).join('') || '·'
 
-    const inner = Math.max(8, Math.floor(W / 4) - 4) // side boxes take 1/4 each; border + padding take 4
-    const wide = Math.max(16, Math.floor(W / 2) - 4)
+    const inner = Math.max(8, Math.floor(W / 3) - 4) // System Status takes 1/3; border + padding take 4
+    const wide = Math.max(16, Math.floor((W * 2) / 3) - 4)
     const header = (
       <Box flexDirection="row">
         {box('SYSTEM STATUS', 1, <Box flexDirection="column">
@@ -570,7 +663,7 @@ export const register: Register = on => {
           <Text wrap="truncate-end">CPU <Text color={loadColor(load)}>{bar(load, Math.max(3, inner - 9))}</Text> {s.load === undefined ? 'n/a' : `${load}%`}</Text>
           <Text wrap="truncate-end">RAM {s.memTotal ? `${(s.memUsed ?? 0).toFixed(1)}/${s.memTotal.toFixed(0)}G` : 'n/a'}</Text>
           <Text wrap="truncate-end"><Text color="#5fd75f">{spark(s.hist, inner)}</Text></Text>
-        </Box>)}
+        </Box>, wThird)}
         {box('AGENT OVERVIEW', 2, <Box flexDirection="column">
           <Box justifyContent="space-between">
             <Text wrap="truncate-end" color="#ff875f" bold>{lv.model ? modelName(lv.model) : '—'}{gh.branch ? ` · ${gh.branch}` : ''}</Text>
@@ -583,19 +676,13 @@ export const register: Register = on => {
             return <Text>  {label} <Text color="#ff875f">{bar(r.pct, 5)}</Text> {Math.round(r.pct)}% <Text dimColor>↻{until(r.resetsAt, now)}</Text></Text>
           })}</Text>
           <Text wrap="truncate-end">last req <Text dimColor>ttft</Text> {lv.ttftMs === undefined ? '—' : `${(lv.ttftMs / 1000).toFixed(1)}s`}   <Text color="#5fd75f">R {running}</Text> <Text color="#ffd75f">W {waiting}</Text> <Text color="#ffd75f">I {idle}</Text> T {fl.length}</Text>
-        </Box>)}
-        {box('SESSION METRICS', 1, <Box flexDirection="column">
-          <Text wrap="truncate-end">TIME {clock(now - (u.startedAt || now))}</Text>
-          <Text wrap="truncate-end">TOKENS {tokens(u.tokens)}</Text>
-          <Text wrap="truncate-end">COST ${(u.usd ?? 0).toFixed(2)}</Text>
-          <Text wrap="truncate-end">TURN ${(u.lastTurnUsd ?? 0).toFixed(2)}</Text>
-        </Box>)}
+        </Box>, W - wThird)}
       </Box>
     )
 
     const save = async () => {
-      const list = await read($, logs)
-      const path = `${await $.session.cwd()}/prodash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
+      const list = logBuf
+      const path = `${sessionCwd}/prodash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
       await $.fs.write(path, list.map(l => `[${hhmmss(l.at)}] [${l.level}] ${l.text}`).join('\n') + '\n')
       $.ui.toast(`Log saved: ${path}`)
     }
@@ -614,8 +701,8 @@ export const register: Register = on => {
     const nConn = servers.filter(x => x.status === 'connected').length
     const nTools = servers.reduce((n, x) => n + x.tools, 0)
     const nBad = servers.filter(x => x.status === 'failed' || x.status === 'needs-auth').length
-    const mcpBox = box('MCP SERVERS', 0, <Box flexDirection="column">
-      <Text wrap="truncate-end"><Text color="#5fd75f">{nConn} connected</Text> · {nTools} tools{nBad ? <Text color="#ff5f5f"> · {nBad} failing</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color="#ffd75f"> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+    const mcpBox = box('MCP SERVERS', 1, <Box flexDirection="column">
+      <Text wrap="truncate-end"><Text color="#5fd75f">{nConn} connected</Text> · {nTools} tools{nBad ? <Text color="#ff5f5f"> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color="#ffd75f"> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
       {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
       {shownMcp.map(x => {
         const [g, c] = MCP_GLYPH[x.status]
@@ -627,8 +714,15 @@ export const register: Register = on => {
         )
       })}
       {servers.length > MCP_ROWS && <Text dimColor>… +{servers.length - MCP_ROWS} servers</Text>}
-    </Box>)
-    const room = Math.max(3, H - 14 - 3 - Math.max(1, shownMcp.length) - (servers.length > MCP_ROWS ? 1 : 0))
+    </Box>, W - wThird)
+    const metricsBox = box('METRICS', 1, <Box flexDirection="column">
+          <Text wrap="truncate-end">TIME {clock(now - (u.startedAt || now))}</Text>
+          <Text wrap="truncate-end">TOKENS {tokens(u.tokens)}</Text>
+          <Text wrap="truncate-end">COST ${(u.usd ?? 0).toFixed(2)}</Text>
+          <Text wrap="truncate-end">TURN ${(u.lastTurnUsd ?? 0).toFixed(2)}</Text>
+        </Box>, wThird)
+    // MCP and Session Metrics share a row: it is as tall as the taller of the two
+    const room = Math.max(3, H - 14 - Math.max(6, 3 + Math.max(1, shownMcp.length) + (servers.length > MCP_ROWS ? 1 : 0)))
     const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
@@ -658,7 +752,16 @@ export const register: Register = on => {
           <Text dimColor>{g.total} checks</Text>
         </Box>
         {rows.length === 0 && <Text dimColor>No permission checks yet.</Text>}
-        {rows.map(r => <Text wrap="truncate-end">{r.map(x => <Text color={GATE_COLOR[x.kind]}>■</Text>)}</Text>)}
+        {rows.map(r => {
+          // one Text per run of the same color, not one per square
+          const runs: [GateKind, number][] = []
+          for (const x of r) {
+            const lastRun = runs[runs.length - 1]
+            if (lastRun && lastRun[0] === x.kind) lastRun[1]++
+            else runs.push([x.kind, 1])
+          }
+          return <Text wrap="truncate-end">{runs.map(([k, n]) => <Text color={GATE_COLOR[k]}>{'■'.repeat(n)}</Text>)}</Text>
+        })}
         <Text wrap="wrap">{sq('a', 'allowed', g.counts.a)}{sq('c', 'classifier', g.counts.c)}{sq('h', 'approved', g.counts.h)}{sq('p', 'pending', g.counts.p)}{sq('d', 'denied', g.counts.d)}</Text>
         <Text wrap="truncate-end"><Text bold>f:</Text> file {g.cats.f}  <Text bold>s:</Text> shell {g.cats.s}  <Text bold>o:</Text> other {g.cats.o}   <Text dimColor>read {g.reads} · write {g.writes}</Text></Text>
         <Text wrap="truncate-end">main {g.main} · forks {g.forks}   <Text dimColor>avg approval wait</Text> {avgWait}   <Text dimColor>auto-approve rate</Text> {g.total ? Math.round(((g.counts.a + g.counts.c) / g.total) * 100) : 0}%</Text>
@@ -685,7 +788,7 @@ export const register: Register = on => {
       </Box>)
     } else if (m === 'board') {
       const [list, files, reqs, pl, bgs, cr, cwd] = await Promise.all([
-        read($, todos), read($, touched), read($, requests), read($, plan), read($, bg), read($, crons), $.session.cwd(),
+        read($, todos), read($, touched), read($, requests), read($, plan), read($, bg), read($, crons), sessionCwd,
       ])
       const isWide = W >= 110
       const cap = Math.max(2, Math.floor((room - 8) / (isWide ? 3 : 5)))
@@ -748,7 +851,7 @@ export const register: Register = on => {
         {back}
       </Box>)
     } else {
-      const g = await read($, git)
+      const g = gh
       const fileRows = Math.max(2, Math.min(8, Math.floor((room - 6) / 2)))
       const nStaged = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[0] !== '.').length
       const nMod = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[1] !== '.').length
@@ -796,7 +899,10 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={W}>
         {header}
-        {mcpBox}
+        <Box flexDirection="row">
+          {mcpBox}
+          {metricsBox}
+        </Box>
         {actions}
         {body}
       </Box>
