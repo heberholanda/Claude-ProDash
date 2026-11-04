@@ -4,7 +4,7 @@ export type Fork = { id: string; name: string; status: string; since: number; to
 export type Sys = { load?: number; memUsed?: number; memTotal?: number; hist: number[] }
 export type RateLimit = { kind: string; pct: number; resetsAt?: string }
 export type Usage = { startedAt: number; ctx?: number; ctxTokens?: number; ctxWindow?: number; limits?: RateLimit[]; usd?: number; lastTurnUsd?: number; turnBaseUsd?: number; tokens: number }
-export type Mode = 'main' | 'agents' | 'perms' | 'board'
+export type Mode = 'main' | 'agents' | 'perms' | 'board' | 'theme'
 export type Perm = { tool: string; ok: number; denied: number }
 export type Live = {
   model?: string
@@ -59,6 +59,11 @@ export type Gate = {
   waitMs: number
   waits: number
 }
+/** the dashboard's color roles; every color the pane draws is one of these */
+export type PaletteKey = 'border' | 'ok' | 'warn' | 'bad' | 'info' | 'accent' | 'amber' | 'dim' | 'dim2' | 'gold' | 'purple' | 'violet' | 'white' | 'user'
+export type Palette = Record<PaletteKey, string>
+/** name: a preset or 'custom'; base: the preset custom starts from; custom: the roles the user overrode (#rrggbb) */
+export type ThemeState = { name: string; base: string; custom: Partial<Palette> }
 /** connected: has tools in the session; the rest come from WaitForMcpServers / ToolSearch results */
 export type McpStatus = 'connected' | 'pending' | 'failed' | 'needs-auth' | 'disabled'
 export type McpServer = {
@@ -102,6 +107,7 @@ declare module 'claude-code' {
       bg: Shaped<Bg[]>
       crons: Shaped<Cron[]>
       mcp: Shaped<McpServer[]>
+      theme: Shaped<ThemeState>
       live: Shaped<Live>
     }
   }
