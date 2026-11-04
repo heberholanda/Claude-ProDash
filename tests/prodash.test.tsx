@@ -129,3 +129,23 @@ test('GITHUB section sits above ACTIVE FORKS and lists pending files', async ($,
     await ui.unmount()
   }
 })
+
+test('ACTIVE FORKS lists main and each fork; a press opens its transcript', async ($, on) => {
+  engine(on)
+  const viewed: unknown[] = []
+  on('ui.view', (_, e) => { viewed.push(e); return { value: {} } })
+  on('state.get', (_, e, next) =>
+    e.key === 'forks'
+      ? { value: { value: { shape: 'forks-2', value: [{ id: 'a1', name: 'Measuring impressions v9 and v10', status: 'running', since: 1_700_000_000_000 - 3_373_000, tools: 3, lastIn: 200_000, out: 11_300 }] }, version: 1 } }
+      : next(e))
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...pane(120), surface })
+    expect(await ui.find({ type: 'Button', key: 'f-main' })).toBeDefined()
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(texts).toContain('Measuring impressions v9 and v10')
+    expect(texts).toMatch(/\d+[hm] \d+[ms] · ↓ 211\.3k tokens/)
+    await ui.press({ key: 'f-a1' })
+    await ui.unmount()
+  }
+  expect(viewed).toContainEqual(expect.objectContaining({ agentId: 'a1' }))
+})
