@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Bg, Cron, Fork, McpServer, McpStatus, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
+import type { Bg, Cron, Fork, McpServer, McpStatus, Palette, PaletteKey, ThemeState, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
 
 const PANE = 'prodash'
 const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
@@ -26,6 +26,7 @@ const requests = atom({ plugin: 'prodash', key: 'requests' } as const, [] as Req
 const plan = atom({ plugin: 'prodash', key: 'plan' } as const, null as Plan | null, { shape: 'plan-1' })
 const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 'bg-1' })
 const mcp = atom({ plugin: 'prodash', key: 'mcp' } as const, [] as McpServer[], { shape: 'mcp-1' })
+const theme = atom({ plugin: 'prodash', key: 'theme' } as const, { name: 'default', base: 'default', custom: {} } as ThemeState, { shape: 'theme-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
 const STATUS_COLOR: Record<string, string> = {
@@ -35,6 +36,39 @@ const STATUS_COLOR: Record<string, string> = {
   idle: '#ffd75f',
 }
 const CYAN = '#5fd7d7'
+
+// Themes: every color the pane draws is written as its default hex and mapped through tc() at draw time.
+// The hex each role is written as in this file (code tokens, not a theme): tc() maps them to the theme in force.
+const TOKENS: Palette = { border: '#5fd7d7', ok: '#5fd75f', warn: '#ffd75f', bad: '#ff5f5f', info: '#5fafff', accent: '#ff875f', amber: '#ffaf00', dim: '#6c6c6c', dim2: '#8a8a8a', gold: '#d7af5f', purple: '#af87ff', violet: '#8787ff', white: '#ffffff', user: '#ffff87' }
+// Soft presets (low saturation, mid luminance); vivid keeps the original bright colors.
+const THEMES: Record<string, Palette> = {
+  default: { border: '#5f7f7f', ok: '#87af87', warn: '#d7c087', bad: '#d78787', info: '#87afd7', accent: '#d7875f', amber: '#d7a65f', dim: '#5f5f5f', dim2: '#808080', gold: '#c0a878', purple: '#afa0d7', violet: '#9a9adf', white: '#d0d0d0', user: '#e0dca0' },
+  matrix: { border: '#2fa84f', ok: '#5fd77f', warn: '#b6e39a', bad: '#d78787', info: '#6fe08f', accent: '#4fc06f', amber: '#a8d77f', dim: '#2f5a3a', dim2: '#4f8a5e', gold: '#8fdf8f', purple: '#7fd7a8', violet: '#6fc08f', white: '#c8f0d0', user: '#d0f0b8' },
+  dracula: { border: '#7c6f9e', ok: '#7fbf8f', warn: '#d6d29a', bad: '#d68a8a', info: '#8fc3cf', accent: '#d4a373', amber: '#d4a373', dim: '#55597a', dim2: '#71769a', gold: '#d6d29a', purple: '#c48fb0', violet: '#a596d1', white: '#e2e2dc', user: '#d6d29a' },
+  nord: { border: '#6f8f99', ok: '#9cb08a', warn: '#d9c08e', bad: '#b9787f', info: '#8199b3', accent: '#c48b75', amber: '#d9c08e', dim: '#4c566a', dim2: '#66718a', gold: '#d9c08e', purple: '#a58aa3', violet: '#7387a8', white: '#d8dee9', user: '#d9c08e' },
+  amber: { border: '#8a6a3a', ok: '#d4b06a', warn: '#e0c896', bad: '#c97a5a', info: '#d4b27f', accent: '#c9935a', amber: '#d4a24f', dim: '#5e4a2c', dim2: '#7d6340', gold: '#ddc08f', purple: '#c9a77f', violet: '#b8915a', white: '#e6d6b8', user: '#eadcbf' },
+  cyberpunk: { border: '#a35a7a', ok: '#6fb3bd', warn: '#d6cf7a', bad: '#d06a85', info: '#6aa8b0', accent: '#b06aa8', amber: '#d4a066', dim: '#4f4560', dim2: '#6c6085', gold: '#d6cf7a', purple: '#b06aa8', violet: '#8a7bc4', white: '#dcdcec', user: '#d6cf7a' },
+  mono: { border: '#6c6c6c', ok: '#b8b8b8', warn: '#a8a8a8', bad: '#d0d0d0', info: '#a0a0a0', accent: '#c6c6c6', amber: '#b0b0b0', dim: '#4e4e4e', dim2: '#707070', gold: '#a8a8a8', purple: '#9a9a9a', violet: '#8e8e8e', white: '#d0d0d0', user: '#c6c6c6' },
+  vivid: { ...TOKENS },
+}
+const ROLE_OF = new Map(Object.entries(TOKENS).map(([k, v]) => [v, k as PaletteKey]))
+const EDITABLE: PaletteKey[] = ['border', 'ok', 'warn', 'bad', 'info', 'accent', 'dim', 'white']
+const SWATCHES: [string, string][] = [
+  ['rose', '#d78787'], ['rust', '#c97a5a'], ['clay', '#d7875f'], ['sand', '#d7c087'], ['honey', '#d7a65f'], ['olive', '#a8c27f'],
+  ['sage', '#87af87'], ['mint', '#8fc9a0'], ['teal', '#6fb3bd'], ['slate', '#5f7f7f'], ['sky', '#87afd7'], ['steel', '#8199b3'],
+  ['lavender', '#afa0d7'], ['iris', '#9a9adf'], ['mauve', '#c48fb0'], ['snow', '#d0d0d0'], ['ash', '#808080'], ['smoke', '#5f5f5f'],
+]
+const HEX = /^#?([0-9a-f]{6})$/i
+// The palette in force for the current draw (set at the top of the pane's render).
+let pal: Palette = THEMES.default!
+const tc = (hex: string) => {
+  const role = ROLE_OF.get(hex)
+  return role ? pal[role] : hex
+}
+const resolveTheme = (t: ThemeState): Palette =>
+  t.name === 'custom' ? { ...(THEMES[t.base] ?? THEMES.default!), ...t.custom } : THEMES[t.name] ?? THEMES.default!
+const isTheme = (v: unknown): v is ThemeState =>
+  !!v && typeof v === 'object' && typeof (v as ThemeState).name === 'string' && typeof (v as ThemeState).base === 'string' && typeof (v as ThemeState).custom === 'object'
 const LIVE = ['pending', 'running', 'waiting', 'idle']
 
 const bar = (pct: number, width: number) => {
@@ -239,6 +273,11 @@ function markDirty($: EngineInterface, key: Dirty) {
   })
 }
 
+async function setTheme($: EngineInterface, fn: (t: ThemeState) => ThemeState) {
+  const next = await update($, theme, fn)
+  await $.store.set('prodash.theme', next).catch(() => undefined)
+}
+
 async function board($: EngineInterface, tool: string, input: Record<string, unknown>, result: unknown) {
   const res = (result ?? {}) as Record<string, unknown>
   const now = Date.now()
@@ -333,6 +372,8 @@ export const register: Register = on => {
     await $.command.register({ name: 'prodash', description: 'Open the Dashboard Pro pane' }).catch(() => undefined)
     await update($, usage, u => ({ ...u, startedAt: u.startedAt || Date.now() })).catch(() => undefined)
     sessionCwd = await $.session.cwd().catch(() => '')
+    const stored = await $.store.get('prodash.theme').catch(() => undefined)
+    if (isTheme(stored)) await update($, theme, () => stored).catch(() => undefined)
     // seed module memory from what an earlier load stored
     await Promise.all([
       read($, logs).then(v => { if (!logBuf.length) logBuf.push(...v) }),
@@ -589,7 +630,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'prodash' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Claude Dashboard Pro', focus: true, columns: 999, rows: 40 })
-    return { text: 'Dashboard Pro opened. Keys 1–4 trigger the action bar.' }
+    return { text: 'Dashboard Pro opened. Keys 1–5 trigger the action bar.' }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -685,10 +726,11 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
     const W = e.props.bodyColumns
     const H = Math.max(12, e.viewport?.rows ?? 30)
-    const [s, u, fl, m, lv, gh, servers] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp)])
+    const [s, u, fl, m, lv, gh, servers, th] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp), read($, theme)])
+    pal = resolveTheme(th)
     const live = fl.filter(f => LIVE.includes(f.status))
     const count = (st: string) => live.filter(f => f.status === st).length
     const running = count('running'), waiting = count('waiting') + count('pending'), idle = count('idle')
@@ -701,11 +743,11 @@ export const register: Register = on => {
       // the border row): the terminal clips what a bordered box draws outside its own content.
       return (
         <Box flexDirection="column" flexGrow={grow} width={w === W ? undefined : w} flexShrink={0} minWidth={0}>
-          <Box flexDirection="column" borderStyle="round" borderColor={CYAN} paddingX={1} flexGrow={1} minWidth={0}>
+          <Box flexDirection="column" borderStyle="round" borderColor={tc(CYAN)} paddingX={1} flexGrow={1} minWidth={0}>
             {body}
           </Box>
           <Box position="absolute" top={0} left={left} width={t.length + 2}>
-            <Text wrap="truncate-end"><Text> </Text><Text color={CYAN} bold>{t}</Text><Text> </Text></Text>
+            <Text wrap="truncate-end"><Text> </Text><Text color={tc(CYAN)} bold>{t}</Text><Text> </Text></Text>
           </Box>
         </Box>
       )
@@ -720,23 +762,23 @@ export const register: Register = on => {
     const header = (
       <Box flexDirection="row">
         {box('SYSTEM STATUS', 1, <Box flexDirection="column">
-          <Text wrap="truncate-end"><Text color={status === 'ONLINE' ? '#5fd75f' : status === 'DEGRADED' ? '#ff5f5f' : '#ffd75f'}>● {status}</Text></Text>
-          <Text wrap="truncate-end">CPU <Text color={loadColor(load)}>{bar(load, Math.max(3, inner - 9))}</Text> {s.load === undefined ? 'n/a' : `${load}%`}</Text>
+          <Text wrap="truncate-end"><Text color={tc(status === 'ONLINE' ? '#5fd75f' : status === 'DEGRADED' ? '#ff5f5f' : '#ffd75f')}>● {status}</Text></Text>
+          <Text wrap="truncate-end">CPU <Text color={tc(loadColor(load))}>{bar(load, Math.max(3, inner - 9))}</Text> {s.load === undefined ? 'n/a' : `${load}%`}</Text>
           <Text wrap="truncate-end">RAM {s.memTotal ? `${(s.memUsed ?? 0).toFixed(1)}/${s.memTotal.toFixed(0)}G` : 'n/a'}</Text>
-          <Text wrap="truncate-end"><Text color="#5fd75f">{spark(s.hist, inner)}</Text></Text>
+          <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{spark(s.hist, inner)}</Text></Text>
         </Box>, wThird)}
         {box('AGENT OVERVIEW', 2, <Box flexDirection="column">
           <Box justifyContent="space-between">
-            <Text wrap="truncate-end" color="#ff875f" bold>{lv.model ? modelName(lv.model) : '—'}{gh.branch ? ` · ${gh.branch}` : ''}</Text>
-            <Text color={lv.isBusy ? '#5fd75f' : '#8a8a8a'}>{lv.isBusy ? '● busy' : '○ idle'}</Text>
+            <Text wrap="truncate-end" color={tc('#ff875f')} bold>{lv.model ? modelName(lv.model) : '—'}{gh.branch ? ` · ${gh.branch}` : ''}</Text>
+            <Text color={tc(lv.isBusy ? '#5fd75f' : '#8a8a8a')}>{lv.isBusy ? '● busy' : '○ idle'}</Text>
           </Box>
-          <Text wrap="truncate-end">effort <Text color="#ff875f">{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}  {lv.reqs} req</Text>
-          <Text wrap="truncate-end">ctx <Text color="#ff875f">{bar(u.ctx ?? 0, Math.max(4, Math.min(12, wide - 28)))}</Text> <Text bold>{u.ctx ?? 0}%</Text> {u.ctxTokens !== undefined && u.ctxWindow ? `${kTok(u.ctxTokens)}/${kTok(u.ctxWindow)}` : ''}{lv.compactions ? <Text color="#ffd75f"> ↺{lv.compactions}</Text> : ''}</Text>
+          <Text wrap="truncate-end">effort <Text color={tc('#ff875f')}>{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}  {lv.reqs} req</Text>
+          <Text wrap="truncate-end">ctx <Text color={tc('#ff875f')}>{bar(u.ctx ?? 0, Math.max(4, Math.min(12, wide - 28)))}</Text> <Text bold>{u.ctx ?? 0}%</Text> {u.ctxTokens !== undefined && u.ctxWindow ? `${kTok(u.ctxTokens)}/${kTok(u.ctxWindow)}` : ''}{lv.compactions ? <Text color={tc('#ffd75f')}> ↺{lv.compactions}</Text> : ''}</Text>
           <Text wrap="truncate-end"><Text bold>${(u.usd ?? 0).toFixed(2)}</Text>{(u.limits ?? []).map(r => {
             const label = r.kind === 'five_hour' ? '5h' : r.kind === 'seven_day' ? '7d' : r.kind
-            return <Text>  {label} <Text color="#ff875f">{bar(r.pct, 5)}</Text> {Math.round(r.pct)}% <Text dimColor>↻{until(r.resetsAt, now)}</Text></Text>
+            return <Text>  {label} <Text color={tc('#ff875f')}>{bar(r.pct, 5)}</Text> {Math.round(r.pct)}% <Text dimColor>↻{until(r.resetsAt, now)}</Text></Text>
           })}</Text>
-          <Text wrap="truncate-end">last req <Text dimColor>ttft</Text> {lv.ttftMs === undefined ? '—' : `${(lv.ttftMs / 1000).toFixed(1)}s`}   <Text color="#5fd75f">R {running}</Text> <Text color="#ffd75f">W {waiting}</Text> <Text color="#ffd75f">I {idle}</Text> T {fl.length}</Text>
+          <Text wrap="truncate-end">last req <Text dimColor>ttft</Text> {lv.ttftMs === undefined ? '—' : `${(lv.ttftMs / 1000).toFixed(1)}s`}   <Text color={tc('#5fd75f')}>R {running}</Text> <Text color={tc('#ffd75f')}>W {waiting}</Text> <Text color={tc('#ffd75f')}>I {idle}</Text> T {fl.length}</Text>
         </Box>, W - wThird)}
       </Box>
     )
@@ -752,14 +794,13 @@ export const register: Register = on => {
       }
     }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
-    const actions = (
-      <Box borderStyle="round" borderColor={CYAN} justifyContent="space-around" flexWrap="wrap">
-        <Button key="a1" hotkey="1" label="AGENT SELECT" onPress={go('agents')} />
-        <Button key="a2" hotkey="2" label="GATE PERMS" onPress={go('perms')} />
-        <Button key="a3" hotkey="3" label="SAVE LOG" onPress={save} />
-        <Button key="a4" hotkey="4" label="PROJECT BOARD" onPress={go('board')} />
-      </Box>
-    )
+    const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-around" flexWrap="wrap">
+      <Button key="a1" hotkey="1" label="AGENT SELECT" onPress={go('agents')} />
+      <Button key="a2" hotkey="2" label="GATE PERMS" onPress={go('perms')} />
+      <Button key="a3" hotkey="3" label="SAVE LOG" onPress={save} />
+      <Button key="a4" hotkey="4" label="PROJECT BOARD" onPress={go('board')} />
+      <Button key="a5" hotkey="5" label="THEME" onPress={go('theme')} />
+    </Box>)
 
     const MCP_ROWS = 5
     const shownMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || b.calls - a.calls).slice(0, MCP_ROWS)
@@ -767,13 +808,13 @@ export const register: Register = on => {
     const nTools = servers.reduce((n, x) => n + x.tools, 0)
     const nBad = servers.filter(x => x.status === 'failed' || x.status === 'needs-auth').length
     const mcpBox = box('MCP SERVERS', 1, <Box flexDirection="column">
-      <Text wrap="truncate-end"><Text color="#5fd75f">{nConn} connected</Text> · {nTools} tools{nBad ? <Text color="#ff5f5f"> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color="#ffd75f"> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+      <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{nConn} connected</Text> · {nTools} tools{nBad ? <Text color={tc('#ff5f5f')}> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color={tc('#ffd75f')}> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
       {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
       {shownMcp.map(x => {
         const [g, c] = MCP_GLYPH[x.status]
         return (
           <Box key={`mcp-${x.name}`} justifyContent="space-between">
-            <Text wrap="truncate-end"><Text color={c}>{g}</Text> {x.name} <Text dimColor>{x.status === 'connected' ? `${x.tools} tools` : x.status}</Text>{x.error ? <Text color="#ff875f"> — {x.error}</Text> : ''}</Text>
+            <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> {x.name} <Text dimColor>{x.status === 'connected' ? `${x.tools} tools` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
             <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text></Box>
           </Box>
         )
@@ -796,7 +837,7 @@ export const register: Register = on => {
         {fl.length === 0 && <Text dimColor>No subagents in this session.</Text>}
         {fl.slice(-room).map(f => (
           <Button key={`ag-${f.id}`} plain onPress={() => $.ui.view({ agentId: f.id })}>
-            {f.name.slice(0, 40)} <Text color={STATUS_COLOR[f.status] ?? '#8a8a8a'}>({f.status.toUpperCase()})</Text> <Text dimColor>{f.tools} tools</Text>
+            {f.name.slice(0, 40)} <Text color={tc(STATUS_COLOR[f.status] ?? '#8a8a8a')}>({f.status.toUpperCase()})</Text> <Text dimColor>{f.tools} tools</Text>
           </Button>
         ))}
         <Button key="main-view" plain onPress={() => $.ui.view({})}>← main conversation</Button>
@@ -807,13 +848,13 @@ export const register: Register = on => {
       const cols = Math.max(10, W - 4)
       const strip = g.events.slice(-cols * 2)
       const rows = [strip.slice(0, Math.max(0, strip.length - cols)), strip.slice(-cols)].filter(x => x.length)
-      const sq = (k: GateKind, label: string, n: number) => <Text><Text color={GATE_COLOR[k]}>{k === 'd' ? '✗' : '■'}</Text> {n} {label}  </Text>
+      const sq = (k: GateKind, label: string, n: number) => <Text><Text color={tc(GATE_COLOR[k])}>{k === 'd' ? '✗' : '■'}</Text> {n} {label}  </Text>
       const avgWait = g.waits ? `${(g.waitMs / g.waits / 1000).toFixed(1)}s` : '—'
       const recent = g.events.filter(x => x.kind !== 'a').slice(-Math.max(3, room - 16)).reverse()
       const VIA: Record<string, string> = { c: 'classifier', h: 'approved', p: 'pending', d: 'denied' }
       body = box('GATE PERMS', 1, <Box flexDirection="column">
         <Box justifyContent="space-between">
-          <Text color="#5fd75f" bold>GATE · permissions</Text>
+          <Text color={tc('#5fd75f')} bold>GATE · permissions</Text>
           <Text dimColor>{g.total} checks</Text>
         </Box>
         {rows.length === 0 && <Text dimColor>No permission checks yet.</Text>}
@@ -825,31 +866,67 @@ export const register: Register = on => {
             if (lastRun && lastRun[0] === x.kind) lastRun[1]++
             else runs.push([x.kind, 1])
           }
-          return <Text wrap="truncate-end">{runs.map(([k, n]) => <Text color={GATE_COLOR[k]}>{'■'.repeat(n)}</Text>)}</Text>
+          return <Text wrap="truncate-end">{runs.map(([k, n]) => <Text color={tc(GATE_COLOR[k])}>{'■'.repeat(n)}</Text>)}</Text>
         })}
         <Text wrap="wrap">{sq('a', 'allowed', g.counts.a)}{sq('c', 'classifier', g.counts.c)}{sq('h', 'approved', g.counts.h)}{sq('p', 'pending', g.counts.p)}{sq('d', 'denied', g.counts.d)}</Text>
         <Text wrap="truncate-end"><Text bold>f:</Text> file {g.cats.f}  <Text bold>s:</Text> shell {g.cats.s}  <Text bold>o:</Text> other {g.cats.o}   <Text dimColor>read {g.reads} · write {g.writes}</Text></Text>
         <Text wrap="truncate-end">main {g.main} · forks {g.forks}   <Text dimColor>avg approval wait</Text> {avgWait}   <Text dimColor>auto-approve rate</Text> {g.total ? Math.round(((g.counts.a + g.counts.c) / g.total) * 100) : 0}%</Text>
         <Box flexDirection="row" marginTop={1}>
           <Box flexDirection="column" flexGrow={1} minWidth={0}>
-            <Text color={CYAN} bold>TOP RULES</Text>
+            <Text color={tc(CYAN)} bold>TOP RULES</Text>
             {g.rules.length === 0 && <Text dimColor>no rule decided yet</Text>}
             {g.rules.slice(0, 5).map(x => <Text wrap="truncate-end"><Text dimColor>{String(x.n).padStart(4)}×</Text> {x.rule}</Text>)}
           </Box>
           <Box flexDirection="column" flexGrow={1} minWidth={0} marginLeft={2}>
-            <Text color={CYAN} bold>TOP TOOLS</Text>
+            <Text color={tc(CYAN)} bold>TOP TOOLS</Text>
             {list.length === 0 && <Text dimColor>no tool calls yet</Text>}
             {list.slice(0, 5).map(x => (
-              <Text wrap="truncate-end">{x.tool.padEnd(14).slice(0, 14)} <Text color="#5fd75f">✓{x.ok}</Text> <Text color={x.denied ? '#ff5f5f' : '#6c6c6c'}>✗{x.denied}</Text></Text>
+              <Text wrap="truncate-end">{x.tool.padEnd(14).slice(0, 14)} <Text color={tc('#5fd75f')}>✓{x.ok}</Text> <Text color={tc(x.denied ? '#ff5f5f' : '#6c6c6c')}>✗{x.denied}</Text></Text>
             ))}
           </Box>
         </Box>
-        <Text color={CYAN} bold>RECENT ASKS & DENIALS</Text>
+        <Text color={tc(CYAN)} bold>RECENT ASKS & DENIALS</Text>
         {recent.length === 0 && <Text dimColor>nothing asked or denied yet</Text>}
         {recent.map(x => (
-          <Text wrap="truncate-end"><Text color="#6c6c6c">[{hhmmss(x.at)}]</Text> <Text color={GATE_COLOR[x.kind]}>{VIA[x.kind]}</Text> {x.tool} <Text dimColor>{x.detail}</Text>{x.waitMs !== undefined ? <Text dimColor> · {(x.waitMs / 1000).toFixed(1)}s</Text> : ''}{x.reason && x.kind === 'd' ? <Text color="#ff875f"> — {x.reason}</Text> : ''}</Text>
+          <Text wrap="truncate-end"><Text color={tc('#6c6c6c')}>[{hhmmss(x.at)}]</Text> <Text color={tc(GATE_COLOR[x.kind])}>{VIA[x.kind]}</Text> {x.tool} <Text dimColor>{x.detail}</Text>{x.waitMs !== undefined ? <Text dimColor> · {(x.waitMs / 1000).toFixed(1)}s</Text> : ''}{x.reason && x.kind === 'd' ? <Text color={tc('#ff875f')}> — {x.reason}</Text> : ''}</Text>
         ))}
         {back}
+      </Box>)
+    } else if (m === 'theme') {
+      const swatch = (p: Palette) => <Text>{(['border', 'ok', 'warn', 'bad', 'info', 'accent', 'purple', 'dim'] as PaletteKey[]).map(k => <Text color={p[k]}>■</Text>)}</Text>
+      const presetRow = (name: string, p: Palette) => (
+        <Button key={`th-${name}`} plain onPress={() => setTheme($, t => ({ ...t, name, base: name === 'custom' ? t.base : name }))}>
+          <Text color={th.name === name ? pal.ok : pal.dim}>{th.name === name ? '●' : '○'} </Text>
+          <Text bold={th.name === name}>{name.padEnd(11)}</Text>
+          {swatch(p)}
+        </Button>
+      )
+      const setRole = (role: PaletteKey, value: string) => {
+        const m = HEX.exec(value.trim())
+        if (!m) return $.ui.toast(`Not a color: "${value.slice(0, 20)}" — use #rrggbb`)
+        return setTheme($, t => ({ ...t, name: 'custom', custom: { ...t.custom, [role]: `#${m[1]!.toLowerCase()}` } }))
+      }
+      body = box('THEME', 1, <Box flexDirection="column">
+        <Text bold color={pal.border}>PRESETS</Text>
+        {Object.entries(THEMES).map(([name, p]) => presetRow(name, p))}
+        {presetRow('custom', resolveTheme({ ...th, name: 'custom' }))}
+        <Box marginTop={1} justifyContent="space-between">
+          <Text bold color={pal.border}>CUSTOM <Text dimColor bold={false}>(starts from {th.base}; pick a color or type #rrggbb + Enter)</Text></Text>
+        </Box>
+        {EDITABLE.map(role => {
+          const cur = resolveTheme({ ...th, name: 'custom' })[role]
+          return (
+            <Box key={`role-${role}`} flexDirection="row" gap={1}>
+              <Text>{role.padEnd(7)} <Text color={cur}>■■</Text> <Text dimColor>{cur}</Text>{th.custom[role] ? <Text color={pal.accent}> *</Text> : '  '}</Text>
+              <Select key={`sel-${role}`} options={SWATCHES.map(([label, value]) => ({ label: `${label} ${value}`, value }))} value={SWATCHES.find(x => x[1] === cur)?.[1]} onSelect={v => setRole(role, v)} />
+              <Input key={`in-${role}`} placeholder="#rrggbb" onSubmit={v => setRole(role, v)} />
+            </Box>
+          )
+        })}
+        <Box gap={2}>
+          <Button key="th-reset" label="RESET CUSTOM" onPress={() => setTheme($, t => ({ ...t, custom: {} }))} />
+          {back}
+        </Box>
       </Box>)
     } else if (m === 'board') {
       const [list, files, reqs, pl, bgs, cr, cwd] = await Promise.all([
@@ -857,21 +934,21 @@ export const register: Register = on => {
       ])
       const isWide = W >= 110
       const cap = Math.max(2, Math.floor((room - 8) / (isWide ? 3 : 5)))
-      const title = (t: string, extra?: string) => <Text color={CYAN} bold wrap="truncate-end">{t}{extra ? <Text dimColor bold={false}>  {extra}</Text> : ''}</Text>
+      const title = (t: string, extra?: string) => <Text color={tc(CYAN)} bold wrap="truncate-end">{t}{extra ? <Text dimColor bold={false}>  {extra}</Text> : ''}</Text>
       const rel = (p: string) => (p.startsWith(cwd) ? p.slice(cwd.length).replace(/^[\\/]/, '') : p)
 
       const tw = list.map(t => ({ status: t.status, words: new Set(words(t.content)) })) // once per draw
       const states = (pl?.steps ?? []).map(st => stepState(st, tw))
       const done = states.filter(x => x === 'done').length
-      const tc = (st: string) => list.filter(t => t.status === st).length
+      const taskCount = (st: string) => list.filter(t => t.status === st).length
       const planSec = <Box flexDirection="column">
         {title('PLAN', pl ? `${done}/${pl.steps.length}  ${'▰'.repeat(Math.round((done / Math.max(1, pl.steps.length)) * 10))}${'▱'.repeat(10 - Math.round((done / Math.max(1, pl.steps.length)) * 10))}` : undefined)}
         {!pl && <Text dimColor>no approved plan yet</Text>}
         {pl && pl.steps.slice(0, cap).map((st, k) => (
-          <Text wrap="truncate-end"><Text color={states[k] === 'done' ? '#5fd75f' : states[k] === 'doing' ? '#5fafff' : '#6c6c6c'}>{states[k] === 'done' ? '✓' : states[k] === 'doing' ? '◐' : '○'}</Text> <Text dimColor={states[k] === 'done'}>{st.text}</Text></Text>
+          <Text wrap="truncate-end"><Text color={tc(states[k] === 'done' ? '#5fd75f' : states[k] === 'doing' ? '#5fafff' : '#6c6c6c')}>{states[k] === 'done' ? '✓' : states[k] === 'doing' ? '◐' : '○'}</Text> <Text dimColor={states[k] === 'done'}>{st.text}</Text></Text>
         ))}
         {pl && pl.steps.length > cap && <Text dimColor>… +{pl.steps.length - cap} steps</Text>}
-        {list.length > 0 && <Text wrap="truncate-end" dimColor>tasks: <Text color="#ffd75f">{tc('pending')} todo</Text> · <Text color="#5fafff">{tc('in_progress')} doing</Text> · <Text color="#5fd75f">{tc('completed')} done</Text>{list.find(t => t.status === 'in_progress') ? `  ▸ ${list.find(t => t.status === 'in_progress')?.content}` : ''}</Text>}
+        {list.length > 0 && <Text wrap="truncate-end" dimColor>tasks: <Text color={tc('#ffd75f')}>{taskCount('pending')} todo</Text> · <Text color={tc('#5fafff')}>{taskCount('in_progress')} doing</Text> · <Text color={tc('#5fd75f')}>{taskCount('completed')} done</Text>{list.find(t => t.status === 'in_progress') ? `  ▸ ${list.find(t => t.status === 'in_progress')?.content}` : ''}</Text>}
       </Box>
 
       const fadd = files.reduce((n, f) => n + f.add, 0), fdel = files.reduce((n, f) => n + f.del, 0)
@@ -879,7 +956,7 @@ export const register: Register = on => {
         {title('FILES TOUCHED', files.length ? `${files.length} files  +${fadd} −${fdel}` : undefined)}
         {files.length === 0 && <Text dimColor>no edits this session</Text>}
         {[...files].sort((a, b) => b.at - a.at).slice(0, cap).map(f => (
-          <Text wrap="truncate-start"><Text color="#5fd75f">+{f.add}</Text> <Text color="#ff5f5f">−{f.del}</Text>{f.isNew ? <Text color="#ffd75f"> new</Text> : ''} {rel(f.path)}</Text>
+          <Text wrap="truncate-start"><Text color={tc('#5fd75f')}>+{f.add}</Text> <Text color={tc('#ff5f5f')}>−{f.del}</Text>{f.isNew ? <Text color={tc('#ffd75f')}> new</Text> : ''} {rel(f.path)}</Text>
         ))}
       </Box>
 
@@ -887,7 +964,7 @@ export const register: Register = on => {
         {title('TIMELINE', reqs.length ? `${reqs.length} requests` : undefined)}
         {reqs.length === 0 && <Text dimColor>no requests yet</Text>}
         {reqs.slice(-cap).reverse().map(q => (
-          <Text wrap="truncate-end"><Text color="#6c6c6c">{q.at ? hhmmss(q.at).slice(0, 5) : '--:--'}</Text> <Text color={q.isDone ? '#5fd75f' : '#ffd75f'}>{q.isDone ? '✓' : '◐'}</Text> <Text dimColor>{String(q.tools).padStart(3)} tools{q.durationMs !== undefined ? ` ${span(q.durationMs)}` : ''}</Text>  {q.text}</Text>
+          <Text wrap="truncate-end"><Text color={tc('#6c6c6c')}>{q.at ? hhmmss(q.at).slice(0, 5) : '--:--'}</Text> <Text color={tc(q.isDone ? '#5fd75f' : '#ffd75f')}>{q.isDone ? '✓' : '◐'}</Text> <Text dimColor>{String(q.tools).padStart(3)} tools{q.durationMs !== undefined ? ` ${span(q.durationMs)}` : ''}</Text>  {q.text}</Text>
         ))}
       </Box>
 
@@ -895,7 +972,7 @@ export const register: Register = on => {
         {title('BACKGROUND', bgs.length ? `${bgs.length} running` : undefined)}
         {bgs.length === 0 && <Text dimColor>no shells or monitors in flight</Text>}
         {bgs.slice(0, cap).map(b => (
-          <Text wrap="truncate-end"><Text color="#5fd75f">●</Text> <Text color="#5fafff">{b.kind.padEnd(8)}</Text>{b.desc} <Text dimColor>{span(now - b.since)}</Text></Text>
+          <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>●</Text> <Text color={tc('#5fafff')}>{b.kind.padEnd(8)}</Text>{b.desc} <Text dimColor>{span(now - b.since)}</Text></Text>
         ))}
       </Box>
 
@@ -903,7 +980,7 @@ export const register: Register = on => {
         {title('SCHEDULED', cr.length ? `${cr.length} jobs` : undefined)}
         {cr.length === 0 && <Text dimColor>nothing scheduled</Text>}
         {cr.slice(0, cap).map(c => (
-          <Text wrap="truncate-end"><Text color="#ffd75f">⏰</Text> {c.schedule}{c.recurring ? '' : ' (once)'}  <Text dimColor>{c.prompt.replace(/\s+/g, ' ')}</Text>{c.nextFireAt ? <Text dimColor> · next {hhmmss(c.nextFireAt).slice(0, 5)}</Text> : ''}</Text>
+          <Text wrap="truncate-end"><Text color={tc('#ffd75f')}>⏰</Text> {c.schedule}{c.recurring ? '' : ' (once)'}  <Text dimColor>{c.prompt.replace(/\s+/g, ' ')}</Text>{c.nextFireAt ? <Text dimColor> · next {hhmmss(c.nextFireAt).slice(0, 5)}</Text> : ''}</Text>
         ))}
       </Box>
 
@@ -923,11 +1000,11 @@ export const register: Register = on => {
       const nMod = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[1] !== '.').length
       const nNew = g.files.filter(f => f.xy === '??').length
       const gitBox = box(g.isRepo ? `GITHUB · ${g.repo ?? 'no remote'}` : 'GITHUB', 0, g.isRepo ? <Box flexDirection="column">
-        <Text wrap="truncate-end">⎇ <Text color="#5fafff" bold>{g.branch ?? '?'}</Text>{g.upstream ? ` → ${g.upstream}` : ' (no upstream)'} <Text color="#5fd75f">↑{g.ahead}</Text> <Text color="#ff875f">↓{g.behind}</Text>{g.stash ? `  stash ${g.stash}` : ''}</Text>
-        {g.pr && <Text wrap="truncate-end">PR <Text color="#af87ff">{g.pr}</Text></Text>}
+        <Text wrap="truncate-end">⎇ <Text color={tc('#5fafff')} bold>{g.branch ?? '?'}</Text>{g.upstream ? ` → ${g.upstream}` : ' (no upstream)'} <Text color={tc('#5fd75f')}>↑{g.ahead}</Text> <Text color={tc('#ff875f')}>↓{g.behind}</Text>{g.stash ? `  stash ${g.stash}` : ''}</Text>
+        {g.pr && <Text wrap="truncate-end">PR <Text color={tc('#af87ff')}>{g.pr}</Text></Text>}
         <Text wrap="truncate-end" dimColor>{g.last ?? 'no commits'}</Text>
-        <Text wrap="truncate-end">PENDING: <Text color="#5fd75f">{nStaged} staged</Text> · <Text color="#ffd75f">{nMod} modified</Text> · <Text color="#ff875f">{nNew} new</Text>{g.files.length === 0 ? ' — clean' : ''}</Text>
-        {g.files.slice(0, fileRows).map((f: GitFile) => <Text wrap="truncate-start"><Text color={fileColor(f.xy)}>{f.xy.replace(/\./g, ' ')}</Text> {f.path}</Text>)}
+        <Text wrap="truncate-end">PENDING: <Text color={tc('#5fd75f')}>{nStaged} staged</Text> · <Text color={tc('#ffd75f')}>{nMod} modified</Text> · <Text color={tc('#ff875f')}>{nNew} new</Text>{g.files.length === 0 ? ' — clean' : ''}</Text>
+        {g.files.slice(0, fileRows).map((f: GitFile) => <Text wrap="truncate-start"><Text color={tc(fileColor(f.xy))}>{f.xy.replace(/\./g, ' ')}</Text> {f.path}</Text>)}
         {g.files.length > fileRows && <Text dimColor>… +{g.files.length - fileRows} file(s)</Text>}
       </Box> : <Text dimColor>Current folder is not a git repository.</Text>)
       const gitRows = g.isRepo ? 4 + Math.min(fileRows + 1, g.files.length) + (g.pr ? 1 : 0) : 1
@@ -942,7 +1019,7 @@ export const register: Register = on => {
         return (
           <Box key={`r-${key}`} justifyContent="space-between">
             <Button key={key} plain onPress={onPress}>
-              <Text color={isOn ? '#ffffff' : '#8a8a8a'}>{isOn ? '●' : '○'} </Text>
+              <Text color={tc(isOn ? '#ffffff' : '#8a8a8a')}>{isOn ? '●' : '○'} </Text>
               <Text bold={isOn} dimColor={!isOn}>{kind.padEnd(6)}</Text>
               <Text bold={isOn} dimColor={!isOn || isEnded}>{shown}</Text>
             </Button>
