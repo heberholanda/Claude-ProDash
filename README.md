@@ -124,7 +124,6 @@ claude plugin test .
 
 To run it from a working copy: `claude --plugin-dir <this folder>`.
 
-
 ## License
 
 MIT
