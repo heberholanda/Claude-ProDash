@@ -45,7 +45,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Metrics** | session duration, total tokens, cost, last turn cost |
 | **Action Bar** | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
-| **Active Forks** | `main` and one row per running subagent with elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
+| **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
 ### Action bar views
 
@@ -96,6 +96,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 
 - Counters start when the mod loads. Earlier permission checks and tool calls are not shown; earlier requests appear in the timeline without a time.
 - A subagent leaves Active Forks once it ends.
+- A fork's activity is built from its tool calls and tasks; the short summary Claude Code's own subagent panel shows is not in the plugin API.
 - There is no API event for "the person refused this ask": a call that waited on an ask and ends with an error worded as a refusal is counted as denied.
 - The classifier is only told apart from your own approvals while the session shows auto mode.
 - Background shells and schedules are rebuilt from tool calls and refreshed each time Claude stops; there is no live list.
