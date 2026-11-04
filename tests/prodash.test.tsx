@@ -204,33 +204,42 @@ function gateSpy(on: On) {
 }
 
 test('tool.check allow by rule counts as a / shell / rule', async ($, on) => {
-  engine(on)
+  const { clock: flushClock } = engine(on)
   on('tool.check', () => ({ decision: 'allow', rule: 'Bash(ls:*)' }))
   const box = gateSpy(on)
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   await $.tool.call({ tool: 'Read', file_path: '/a.ts' })
+  await flushClock.advance(1000)
   const g = box.g!
   expect(g, 'gate never written').toBeDefined()
+  await flushClock.advance(1000)
   expect(g.total).toBe(2)
+  await flushClock.advance(1000)
   expect(g.counts.a).toBe(2)
+  await flushClock.advance(1000)
   expect(g.cats).toEqual({ f: 1, s: 1, o: 0 })
+  await flushClock.advance(1000)
   expect(g.rules).toContainEqual({ rule: 'Bash(ls:*)', n: 2 })
+  await flushClock.advance(1000)
   expect(g.events.map(e => [e.tool, e.kind, e.via])).toEqual([['Bash', 'a', 'rule'], ['Read', 'a', 'rule']])
 })
 
 test('tool.check deny counts as d; queries are ignored', async ($, on) => {
-  engine(on)
+  const { clock: flushClock } = engine(on)
   on('tool.check', () => ({ decision: 'deny', reason: 'blocked' }))
   const box = gateSpy(on)
   await $.tool.call({ tool: 'WebFetch', url: 'https://x.io' })
   await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
+  await flushClock.advance(1000)
   expect(box.g?.total).toBe(1)
+  await flushClock.advance(1000)
   expect(box.g?.counts.d).toBe(1)
+  await flushClock.advance(1000)
   expect(box.g?.cats.o).toBe(1)
 })
 
 test('an ask is pending, then approved (h) or denied (d) when the call finishes', async ($, on) => {
-  engine(on)
+  const { clock: flushClock } = engine(on)
   on('tool.check', () => ({ decision: 'ask' }))
   let answer: 'allow' | 'deny' = 'allow'
   on('classic.PermissionRequest', () => ({ decision: answer === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: "The user doesn't want to proceed with this tool use." } }) as never)
@@ -239,9 +248,12 @@ test('an ask is pending, then approved (h) or denied (d) when the call finishes'
   answer = 'deny'
   // a PermissionRequest deny resolves the call errored ({ isError, text }), not with a `deny` field
   await $.tool.call({ tool: 'Bash', command: 'rm y' })
+  await flushClock.advance(1000)
   const g = box.g!
   expect(g.events.map(e => e.kind)).toEqual(['h', 'd'])
+  await flushClock.advance(1000)
   expect(g.counts.p).toBe(0)
+  await flushClock.advance(1000)
   expect(typeof g.events[0].waitMs).toBe('number')
 })
 
@@ -321,17 +333,21 @@ test('Edit and Write results become touched files', async ($, on) => {
 })
 
 test('a prompt opens a request, main tool calls count, turn.complete closes it', async ($, on) => {
-  engine(on)
+  const { clock: flushClock } = engine(on)
   const box = boardSpy(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'build it' })
+  await flushClock.advance(1000)
   expect((box.requests as Request[])?.at(-1)).toMatchObject({ text: 'build it', tools: 0, isDone: false })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   await $.tool.call({ tool: 'Bash', command: 'pwd' })
+  await flushClock.advance(1000)
   expect((box.requests as Request[]).at(-1)?.tools).toBe(2)
   await ($ as any).turn.complete({ answer: 'ok', durationMs: 1234, isAborted: false, turnId: 't1', reason: 'answer' })
   const r = (box.requests as Request[]).at(-1)!
+  await flushClock.advance(1000)
   expect(r.isDone).toBe(true)
+  await flushClock.advance(1000)
   expect(typeof r.durationMs).toBe('number')
 })
 
@@ -443,7 +459,7 @@ test('session.start groups mcp__<server>__<tool> by server as connected', async 
 })
 
 test('a tool.call to mcp__srv__x counts calls, time, lastAt; isError counts an error', async ($, on) => {
-  const { list } = engine(on)
+  const { clock: flushClock, list } = engine(on)
   list.push(mcpTool('mcp__srv__x'), mcpTool('mcp__srv__bad'))
   // a person's deny on an ask resolves the call errored: top-level { isError: true, text }
   on('tool.check', (_, e, next) => e.tool === 'mcp__srv__bad' ? { decision: 'ask' } : next(e))
@@ -451,22 +467,28 @@ test('a tool.call to mcp__srv__x counts calls, time, lastAt; isError counts an e
   const box = mcpSpy(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'mcp__srv__x' } as never)
+  await flushClock.advance(1000)
   expect(srv(box, 'srv')).toMatchObject({ calls: 1, errors: 0 })
+  await flushClock.advance(1000)
   expect(typeof srv(box, 'srv')!.totalMs).toBe('number')
+  await flushClock.advance(1000)
   expect(typeof srv(box, 'srv')!.lastAt).toBe('number')
   await $.tool.call({ tool: 'mcp__srv__bad' } as never)
+  await flushClock.advance(1000)
   expect(srv(box, 'srv')).toMatchObject({ calls: 2, errors: 1 })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await flushClock.advance(1000)
   expect(srv(box, 'srv')?.calls).toBe(2)
 })
 
 test('a denied mcp call counts an error', async ($, on) => {
-  const { list } = engine(on)
+  const { clock: flushClock, list } = engine(on)
   list.push(mcpTool('mcp__srv__x'))
   on('tool.check', () => ({ decision: 'deny', reason: 'blocked' }))
   const box = mcpSpy(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'mcp__srv__x' } as never)
+  await flushClock.advance(1000)
   expect(srv(box, 'srv')).toMatchObject({ calls: 1, errors: 1 })
 })
 
