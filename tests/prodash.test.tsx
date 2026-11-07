@@ -176,6 +176,28 @@ test('ACTIVE FORKS shows the activity of a live fork, not of an ended one', asyn
   await ui.unmount()
 })
 
+test('AGENT SELECT is Active Forks full screen, with each fork\'s tool calls', async ($, on) => {
+  engine(on)
+  const viewed: unknown[] = []
+  on('ui.view', (_, e) => { viewed.push(e); return { value: {} } })
+  const fork = (id: string, status: string, act: string) => ({ id, name: `job ${id}`, status, since: 1_700_000_000_000 - 60_000, tools: 7, lastIn: 1_000, out: 500, act })
+  on('state.get', (_, e, next) =>
+    e.key === 'forks' ? { value: { value: { shape: 'forks-2', value: [fork('a1', 'running', 'Counting deposits'), fork('a2', 'completed', 'old')] }, version: 1 } }
+    : e.key === 'mode' ? { value: { value: 'agents', version: 1 } } as never
+    : next(e))
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join(' ')
+  expect(texts).toContain('AGENT SELECT')
+  expect(texts).not.toContain('ACTIVE FORKS')
+  expect(texts).toContain('Counting deposits')
+  expect(texts).toContain('job a2')
+  expect(texts).toMatch(/7 tools · \d+[hms]( \d+[ms])? · ↓ 1\.5k tokens/)
+  expect(await ui.find({ type: 'Button', key: 'f-main' })).toBeDefined()
+  await ui.press({ key: 'f-a2' })
+  expect(viewed).toContainEqual(expect.objectContaining({ agentId: 'a2' }))
+  await ui.unmount()
+})
+
 // ---- GATE PERMS ----
 import type { Gate } from '../types/index'
 

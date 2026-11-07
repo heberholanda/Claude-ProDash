@@ -30,12 +30,6 @@ const ctxInfo = atom({ plugin: 'prodash', key: 'ctx' } as const, { used: 0, max:
 const theme = atom({ plugin: 'prodash', key: 'theme' } as const, { name: 'default', base: 'default', custom: {} } as ThemeState, { shape: 'theme-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
-const STATUS_COLOR: Record<string, string> = {
-  running: '#5fd75f',
-  pending: '#ffd75f',
-  waiting: '#ffd75f',
-  idle: '#ffd75f',
-}
 const CYAN = '#5fd7d7'
 
 // Themes: every color the pane draws is written as its default hex and mapped through tc() at draw time.
@@ -877,15 +871,47 @@ export const register: Register = on => {
     const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
-    if (m === 'agents') {
-      body = box('AGENT SELECT — opens the agent transcript', 1, <Box flexDirection="column">
-        {fl.length === 0 && <Text dimColor>No subagents in this session.</Text>}
-        {fl.slice(-room).map(f => (
-          <Button key={`ag-${f.id}`} plain onPress={() => $.ui.view({ agentId: f.id })}>
-            {f.name.slice(0, 40)} <Text color={tc(STATUS_COLOR[f.status] ?? '#8a8a8a')}>({f.status.toUpperCase()})</Text> <Text dimColor>{f.tools} tools</Text>
+    // One row per loop: main first, then each fork; ● marks the one in view, a press opens its transcript.
+    const viewed = e.props.view.agentId
+    const rowW = Math.max(20, W - 4)
+    const row = (key: string, kind: string, name: string, right: string, isOn: boolean, isEnded: boolean, onPress: () => unknown, act = '') => {
+      // Time and tokens sit outside the Button with a fixed width, so a long name is what gets cut.
+      const nameW = Math.max(4, rowW - 2 - 6 - right.length - 4)
+      const shown = name.length > nameW ? `${name.slice(0, nameW - 1)}…` : name
+      // The activity takes what is left after the name.
+      const actW = nameW - shown.length - 3
+      const doing = act && actW >= 6 ? (act.length > actW ? `${act.slice(0, actW - 1)}…` : act) : ''
+      return (
+        <Box key={`r-${key}`} justifyContent="space-between">
+          <Button key={key} plain onPress={onPress}>
+            <Text color={tc(isOn ? '#ffffff' : '#8a8a8a')}>{isOn ? '●' : '○'} </Text>
+            <Text bold={isOn} dimColor={!isOn}>{kind.padEnd(6)}</Text>
+            <Text bold={isOn} dimColor={!isOn || isEnded}>{shown}</Text>
+            {doing && <Text color={tc('#6c6c6c')}> · {doing}</Text>}
           </Button>
-        ))}
-        <Button key="main-view" plain onPress={() => $.ui.view({})}>← main conversation</Button>
+          {right && <Box flexShrink={0} marginLeft={1}><Text dimColor={!isOn}>{right}</Text></Box>}
+        </Box>
+      )
+    }
+    // main, then the last `limit` forks; withTools adds each fork's tool calls (the full-screen list)
+    const forkRows = (limit: number, withTools: boolean) => [
+      row('f-main', 'main', '', `${span(now - (u.startedAt || now))} · ↓ ${kTok1(u.tokens)} tokens`, viewed === undefined, false, () => $.ui.view({})),
+      ...fl.slice(-limit).map(f => row(
+        `f-${f.id}`, 'fork', f.name,
+        `${withTools ? `${f.tools} tools · ` : ''}${span(now - f.since)} · ↓ ${kTok1(f.lastIn + f.out)} tokens`,
+        viewed === f.id, !LIVE.includes(f.status),
+        () => $.ui.view({ agentId: f.id }),
+        LIVE.includes(f.status) ? f.act : '',
+      )),
+    ]
+
+    if (m === 'agents') {
+      // Active Forks at full height, with each fork's tool calls
+      const limit = Math.max(2, room - 4)
+      body = box('AGENT SELECT — opens the agent transcript', 1, <Box flexDirection="column">
+        {forkRows(limit, true)}
+        {fl.length === 0 && <Text dimColor>No subagents in this session.</Text>}
+        {fl.length > limit && <Text dimColor>… +{fl.length - limit} earlier</Text>}
         {back}
       </Box>)
     } else if (m === 'perms') {
@@ -1054,38 +1080,7 @@ export const register: Register = on => {
       </Box> : <Text dimColor>Current folder is not a git repository.</Text>)
       const gitRows = g.isRepo ? 4 + Math.min(fileRows + 1, g.files.length) + (g.pr ? 1 : 0) : 1
       const forkRoom = Math.max(2, room - gitRows - 3)
-      // One row per loop: main first, then each fork; ● marks the one in view, a press opens its transcript.
-      const viewed = e.props.view.agentId
-      const rowW = Math.max(20, W - 4)
-      const row = (key: string, kind: string, name: string, right: string, isOn: boolean, isEnded: boolean, onPress: () => unknown, act = '') => {
-        // Time and tokens sit outside the Button with a fixed width, so a long name is what gets cut.
-        const nameW = Math.max(4, rowW - 2 - 6 - right.length - 4)
-        const shown = name.length > nameW ? `${name.slice(0, nameW - 1)}…` : name
-        // The activity takes what is left after the name.
-        const actW = nameW - shown.length - 3
-        const doing = act && actW >= 6 ? (act.length > actW ? `${act.slice(0, actW - 1)}…` : act) : ''
-        return (
-          <Box key={`r-${key}`} justifyContent="space-between">
-            <Button key={key} plain onPress={onPress}>
-              <Text color={tc(isOn ? '#ffffff' : '#8a8a8a')}>{isOn ? '●' : '○'} </Text>
-              <Text bold={isOn} dimColor={!isOn}>{kind.padEnd(6)}</Text>
-              <Text bold={isOn} dimColor={!isOn || isEnded}>{shown}</Text>
-              {doing && <Text color={tc('#6c6c6c')}> · {doing}</Text>}
-            </Button>
-            {right && <Box flexShrink={0} marginLeft={1}><Text dimColor={!isOn}>{right}</Text></Box>}
-          </Box>
-        )
-      }
-      const forksBox = box('ACTIVE FORKS', 1, <Box flexDirection="column">
-        {row('f-main', 'main', '', `${span(now - (u.startedAt || now))} · ↓ ${kTok1(u.tokens)} tokens`, viewed === undefined, false, () => $.ui.view({}))}
-        {fl.slice(-forkRoom).map(f => row(
-          `f-${f.id}`, 'fork', f.name,
-          `${span(now - f.since)} · ↓ ${kTok1(f.lastIn + f.out)} tokens`,
-          viewed === f.id, !LIVE.includes(f.status),
-          () => $.ui.view({ agentId: f.id }),
-          LIVE.includes(f.status) ? f.act : '',
-        ))}
-      </Box>)
+      const forksBox = box('ACTIVE FORKS', 1, <Box flexDirection="column">{forkRows(forkRoom, false)}</Box>)
       body = <Box flexDirection="column">{gitBox}{forksBox}</Box>
     }
 

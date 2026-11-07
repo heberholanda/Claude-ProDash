@@ -51,7 +51,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 
 Press the key again, or **BACK**, to return to the main view.
 
-**`1` Agent Select**: every subagent of the session with its status and tool calls. Pick one to open its transcript.
+**`1` Agent Select**: Active Forks at full height, for when the list does not fit the main view: `main` and every subagent with its current activity, tool calls, elapsed time and tokens. Pick one to open its transcript, `main` to come back.
 
 **`2` Gate Perms**: every permission check of the session.
 - A color strip with one square per check: allowed, approved by the auto-mode classifier, approved by you, pending, denied.
