@@ -284,7 +284,8 @@ async function ctxSample($: EngineInterface) {
   if (!b) return
   const byServer: Record<string, number> = {}
   for (const t of b.mcpTools) { const k = mcpServer(t.name); if (k) byServer[k] = (byServer[k] ?? 0) + t.tokens }
-  const v: Ctx = { used: b.totalTokens, max: b.rawMaxTokens, rows: b.categories.map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind })), mcp: byServer }
+  const v: Ctx = { used: b.totalTokens, max: b.rawMaxTokens, rows: b.categories.map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind }))
+    .sort((a, z) => Number(a.kind === 'free') - Number(z.kind === 'free') || z.tokens - a.tokens), mcp: byServer }
   const json = JSON.stringify(v)
   if (json !== lastCtx) { lastCtx = json; await update($, ctxInfo, () => v) }
 }

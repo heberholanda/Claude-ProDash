@@ -474,6 +474,11 @@ test('CONTEXT: /context rows with tokens and share; MCP rows carry their schema 
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
     for (const s of ['20% used', '198.9k / 1.0M', 'Messages', '159.1k', '15.9%', 'Free space', '76.7%', 'MCP tools (deferred)', '—', '1.2k', '1.5k tokens'])
       expect(texts, `${surface}: ${s}\n${texts}`).toContain(s)
+    // most tokens first, Free space last
+    const at = (s: string) => texts.indexOf(s)
+    expect(at('Messages')).toBeLessThan(at('MCP tools (deferred)'))
+    expect(at('MCP tools (deferred)')).toBeLessThan(at('Autocompact buffer'))
+    expect(at('Autocompact buffer')).toBeLessThan(at('Free space'))
     await ui.unmount()
   }
 })
