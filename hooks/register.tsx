@@ -1087,11 +1087,11 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={W}>
         {header}
+        {actions}
         <Box flexDirection="row">
           {mcpBox}
           {ctxBox}
         </Box>
-        {actions}
         {body}
       </Box>
     )

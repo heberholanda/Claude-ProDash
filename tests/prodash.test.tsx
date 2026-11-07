@@ -473,6 +473,10 @@ test('MCP SERVERS: box under the header row with summary and rows, 80 and 140', 
     // beta has no calls: no avg on its row
     expect(texts.match(/avg \d+\.\d+s/g)?.length, `${surface} ${cols}: one avg only`).toBe(1)
     expect(await ui.find({ type: 'Button', key: 'a1' }), 'action bar still there').toBeDefined()
+    // the action bar sits between the header row and the MCP / Context row
+    const bar = all.findIndex(t => t === 'ACTION BAR')
+    expect(bar, `${surface} ${cols}: action bar below header`).toBeGreaterThan(all.findIndex(t => t === 'AGENT OVERVIEW'))
+    expect(bar, `${surface} ${cols}: action bar above MCP`).toBeLessThan(at)
     await ui.unmount()
   }
 })
