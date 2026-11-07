@@ -95,13 +95,13 @@ test('600 tool calls keep logs at 500', { timeoutMs: 20_000 }, async ($, on) => 
   expect(longest).toBe(500)
 })
 
-test('action bar: a4 opens the board, back returns to the forks', async ($, on) => {
+test('action bar: a3 opens the board, back returns to the forks', async ($, on) => {
   engine(on)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...pane(160), surface })
     for (const k of ['a1', 'a2', 'a3', 'a4']) expect(await ui.find({ type: 'Button', key: k }), k).toBeDefined()
-    await ui.press({ key: 'a4' })
-    expect(await ui.find({ type: 'Text', text: /PROJECT BOARD/ })).toBeDefined()
+    await ui.press({ key: 'a3' })
+    expect(await ui.find({ type: 'Text', text: 'BOARD' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'ACTIVE FORKS' })).toBeUndefined()
     await ui.press({ key: 'back' })
     expect(await ui.find({ type: 'Text', text: 'ACTIVE FORKS' })).toBeDefined()
@@ -198,7 +198,7 @@ test('FORKS view is Active Forks full screen, with each fork\'s tool calls', asy
   await ui.unmount()
 })
 
-// ---- GATE PERMS ----
+// ---- PERMISSIONS ----
 import type { Gate } from '../types/index'
 
 const GATE: Gate = {
@@ -215,7 +215,7 @@ const GATE: Gate = {
   waitMs: 4_000, waits: 2,
 }
 
-test('a2 opens GATE PERMS with counters, rules and recent asks; back returns', async ($, on) => {
+test('a2 opens PERMISSIONS with counters, rules and recent asks; back returns', async ($, on) => {
   engine(on)
   on('state.get', (_, e, next) =>
     e.key === 'gate' ? { value: { value: { shape: 'gate-1', value: GATE }, version: 1 } } : next(e))
@@ -297,7 +297,7 @@ test('an ask is pending, then approved (h) or denied (d) when the call finishes'
   expect(typeof g.events[0].waitMs).toBe('number')
 })
 
-// ---- PROJECT BOARD ----
+// ---- BOARD ----
 import type { Touched, Request, Plan, Bg, Cron, Todo } from '../types/index'
 
 const NOW = 1_700_000_000_000
@@ -321,9 +321,9 @@ test('a4 board: every section at 80 and 140, empty and seeded; back returns', as
   engine(on)
   for (const surface of SURFACES) for (const cols of [80, 140]) {
     const ui = await $.ui.mount({ ...pane(cols), surface })
-    await ui.press({ key: 'a4' })
+    await ui.press({ key: 'a3' })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
-    for (const s of ['PROJECT BOARD', 'PLAN', 'FILES TOUCHED', 'TIMELINE', 'BACKGROUND', 'SCHEDULED'])
+    for (const s of ['BOARD', 'PLAN', 'FILES TOUCHED', 'TIMELINE', 'BACKGROUND', 'SCHEDULED'])
       expect(texts, `${surface} ${cols} empty: ${s}`).toContain(s)
     await ui.press({ key: 'back' })
     expect(await ui.find({ type: 'Text', text: 'ACTIVE FORKS' })).toBeDefined()
@@ -336,9 +336,9 @@ test('a4 board renders seeded plan, files, timeline, background and crons', asyn
   seedBoard(on)
   for (const surface of SURFACES) for (const cols of [80, 140]) {
     const ui = await $.ui.mount({ ...pane(cols), surface })
-    await ui.press({ key: 'a4' })
+    await ui.press({ key: 'a3' })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
-    for (const s of ['PROJECT BOARD', 'PLAN', 'FILES TOUCHED', 'TIMELINE', 'BACKGROUND', 'SCHEDULED',
+    for (const s of ['BOARD', 'PLAN', 'FILES TOUCHED', 'TIMELINE', 'BACKGROUND', 'SCHEDULED',
       'Add parser', 'Write tests', 'a.ts', '+2 −1', 'build it', 'dev server', 'every 5 minutes'])
       expect(texts, `${surface} ${cols}: ${s}\n${texts}`).toContain(s)
     await ui.press({ key: 'back' }) // mode persists across mounts; a4 toggles
@@ -616,18 +616,18 @@ const PRESETS = ['default', 'matrix', 'dracula', 'nord', 'amber', 'cyberpunk', '
 const ROLES = ['border', 'ok', 'warn', 'bad', 'info', 'accent', 'dim', 'white']
 
 async function openTheme(ui: any, label: string) {
-  await ui.press({ key: 'a5' })
+  await ui.press({ key: 'a4' })
   expect(await ui.find({ type: 'Text', text: /THEME/ }), `${label}: THEME view`).toBeDefined()
 }
 
-test('action bar is a titled box with a1..a5, a5 = THEME', async ($, on) => {
+test('action bar is a titled box with a1..a5 in order: FORKS, PERMISSIONS, BOARD, THEME, SAVE LOG', async ($, on) => {
   engine(on)
   for (const surface of SURFACES) for (const cols of [80, 160]) {
     const ui = await $.ui.mount({ ...pane(cols), surface })
     expect(await ui.find({ type: 'Text', text: 'ACTION BAR' }), `${surface} ${cols}: title`).toBeDefined()
     for (const k of ['a1', 'a2', 'a3', 'a4', 'a5']) expect(await ui.find({ type: 'Button', key: k }), `${surface} ${cols}: ${k}`).toBeDefined()
-    const a5 = await ui.find({ type: 'Button', key: 'a5' })
-    expect(String(a5?.props.label ?? a5?.text), `${surface} ${cols}: a5 label`).toMatch(/THEME/)
+    const labels = await Promise.all(['a1', 'a2', 'a3', 'a4', 'a5'].map(async k => { const b = await ui.find({ type: 'Button', key: k }); return String(b?.props.label ?? b?.text) }))
+    expect(labels, `${surface} ${cols}: labels`).toEqual(['FORKS', 'PERMISSIONS', 'BOARD', 'THEME', 'SAVE LOG'])
     await ui.unmount()
   }
 })

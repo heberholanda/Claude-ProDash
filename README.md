@@ -43,7 +43,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
 | **MCP Servers** | connected servers, tool count and the tokens their tool schemas take; per server: status, tools, calls, errors, average latency, last use, schema tokens; failed, pending, needs-auth and disabled servers with their error |
 | **Context** | the context window as `/context` breaks it down: % used, tokens used / window, a stacked bar, and each category (messages, system tools, skills, system prompt, MCP tools, memory files, autocompact buffer, free space, deferred tools) with its tokens and share |
-| **Action Bar** | `1` Forks · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
+| **Action Bar** | `1` Forks · `2` Permissions · `3` Board · `4` Theme · `5` Save Log |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
@@ -53,7 +53,7 @@ Press the key again, or **BACK**, to return to the main view.
 
 **`1` Forks**: Active Forks at full height, for when the list does not fit the main view: `main` and every subagent with its current activity, tool calls, elapsed time and tokens. Pick one to open its transcript, `main` to come back.
 
-**`2` Gate Perms**: every permission check of the session.
+**`2` Permissions**: every permission check of the session.
 - A color strip with one square per check: allowed, approved by the auto-mode classifier, approved by you, pending, denied.
 - Totals by kind, by category (file · shell · other), reads vs writes, main vs forks.
 - Average wait for an approval and the auto-approve rate.
@@ -61,21 +61,21 @@ Press the key again, or **BACK**, to return to the main view.
 - **Top tools**: calls run and denied per tool.
 - **Recent asks & denials**: time, outcome, tool, command or file, wait, and the reason for a denial.
 
-**`3` Save Log**: writes the session's event log (prompts, tool calls, agent events; last 500 lines) to `prodash-<timestamp>.log` in the session folder.
-
-**`4` Project Board**:
+**`3` Board**:
 - **Plan**: steps of the last approved plan (plan mode) with progress, marked done when a completed task matches the step; task counts and the task in progress.
 - **Files touched**: each file edited this session with `+` / `−` lines, new files marked.
 - **Timeline**: your requests with time, tool calls and duration.
 - **Background**: shells and monitors running in the background.
 - **Scheduled**: cron jobs and wakeups with their next run.
 
-**`5` Theme**: the dashboard's colors.
+**`4` Theme**: the dashboard's colors.
 - **Presets** (soft palettes): `default`, `matrix`, `dracula`, `nord`, `amber`, `cyberpunk`, `mono`, and `vivid` (bright colors).
 - **Custom**: starts from the last preset and lets you set each role (border, ok, warn, bad, info, accent, dim, text) from a list of colors or by typing `#rrggbb` + Enter. Changed roles show `*`; **RESET CUSTOM** undoes them.
 - The theme is saved across sessions.
 
 To type in the custom fields, open the pane with `/prodash` so it holds the keyboard.
+
+**`5` Save Log**: writes the session's event log (prompts, tool calls, agent events; last 500 lines) to `prodash-<timestamp>.log` in the session folder.
 
 ## How it gets its data
 

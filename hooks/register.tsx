@@ -814,10 +814,10 @@ export const register: Register = on => {
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
     const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-around" flexWrap="wrap">
       <Button key="a1" hotkey="1" label="FORKS" onPress={go('agents')} />
-      <Button key="a2" hotkey="2" label="GATE PERMS" onPress={go('perms')} />
-      <Button key="a3" hotkey="3" label="SAVE LOG" onPress={save} />
-      <Button key="a4" hotkey="4" label="PROJECT BOARD" onPress={go('board')} />
-      <Button key="a5" hotkey="5" label="THEME" onPress={go('theme')} />
+      <Button key="a2" hotkey="2" label="PERMISSIONS" onPress={go('perms')} />
+      <Button key="a3" hotkey="3" label="BOARD" onPress={go('board')} />
+      <Button key="a4" hotkey="4" label="THEME" onPress={go('theme')} />
+      <Button key="a5" hotkey="5" label="SAVE LOG" onPress={save} />
     </Box>)
 
     // Context rows first: the MCP box beside it shows as many servers as the Context box is tall
@@ -923,7 +923,7 @@ export const register: Register = on => {
       const avgWait = g.waits ? `${(g.waitMs / g.waits / 1000).toFixed(1)}s` : '—'
       const recent = g.events.filter(x => x.kind !== 'a').slice(-Math.max(3, room - 16)).reverse()
       const VIA: Record<string, string> = { c: 'classifier', h: 'approved', p: 'pending', d: 'denied' }
-      body = box('GATE PERMS', 1, <Box flexDirection="column">
+      body = box('PERMISSIONS', 1, <Box flexDirection="column">
         <Box justifyContent="space-between">
           <Text color={tc('#5fd75f')} bold>GATE · permissions</Text>
           <Text dimColor>{g.total} checks</Text>
@@ -1055,7 +1055,7 @@ export const register: Register = on => {
         ))}
       </Box>
 
-      body = box('PROJECT BOARD', 1, <Box flexDirection="column">
+      body = box('BOARD', 1, <Box flexDirection="column">
         {isWide
           ? <Box flexDirection="row">
               <Box flexDirection="column" flexGrow={1} minWidth={0}>{planSec}{filesSec}</Box>

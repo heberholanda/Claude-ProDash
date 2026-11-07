@@ -1,1 +1,1 @@
-{"name": "prodash", "version": "0.3.3", "description": "Pro Dash: system status, agents, MCP servers, context breakdown, git, permissions, project board and themes in one pane", "types": "./types/index.d.ts"}
+{"name": "prodash", "version": "0.3.4", "description": "Pro Dash: system status, agents, MCP servers, context breakdown, git, permissions, project board and themes in one pane", "types": "./types/index.d.ts"}
