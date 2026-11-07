@@ -2,6 +2,8 @@
 
 Pro Dash is a dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, the context window breakdown, the git repository and the live subagents (forks). It also has views for permission checks, project progress and color themes.
 
+![Pro Dash beside a Claude Code session](docs/screenshot.png)
+
 ## Install
 
 At the prompt of a Claude Code terminal session:
