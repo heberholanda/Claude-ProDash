@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Bg, Cron, Fork, McpServer, McpStatus, Palette, PaletteKey, ThemeState, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
+import type { Bg, Cron, Ctx, Fork, McpServer, McpStatus, Palette, PaletteKey, ThemeState, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
 
 const PANE = 'prodash'
 const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
@@ -26,6 +26,7 @@ const requests = atom({ plugin: 'prodash', key: 'requests' } as const, [] as Req
 const plan = atom({ plugin: 'prodash', key: 'plan' } as const, null as Plan | null, { shape: 'plan-1' })
 const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 'bg-1' })
 const mcp = atom({ plugin: 'prodash', key: 'mcp' } as const, [] as McpServer[], { shape: 'mcp-1' })
+const ctxInfo = atom({ plugin: 'prodash', key: 'ctx' } as const, { used: 0, max: 0, rows: [], mcp: {} } as Ctx, { shape: 'ctx-1' })
 const theme = atom({ plugin: 'prodash', key: 'theme' } as const, { name: 'default', base: 'default', custom: {} } as ThemeState, { shape: 'theme-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
@@ -77,20 +78,12 @@ const bar = (pct: number, width: number) => {
 }
 const spark = (values: number[], width = HIST) =>
   values.slice(-Math.max(1, width)).map(v => '▁▂▃▄▅▆▇█'[Math.min(7, Math.max(0, Math.round((v / 100) * 7)))]).join('')
-const clock = (ms: number) => {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60
-  const p = (n: number) => String(n).padStart(2, '0')
-  return hh ? `${hh}:${p(mm)}:${p(ss)}` : `${mm}:${p(ss)}`
-}
 // 56m 13s / 1h 4m / 9s
 const span = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000))
   return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`
 }
 const hhmmss = (at: number) => new Date(at).toTimeString().slice(0, 8)
-const tokens = (n: number) =>
-  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n)
 const loadColor = (pct: number) => (pct >= 90 ? '#ff5f5f' : pct >= 70 ? '#ffaf00' : '#5fd75f')
 const push = (hist: number[], v: number) => [...hist, v].slice(-HIST)
 
@@ -284,6 +277,18 @@ function markDirty($: EngineInterface, key: Dirty) {
   })
 }
 
+let lastCtx = ''
+// /context's breakdown, estimated locally ('summary' sends no request); written only when it changed
+async function ctxSample($: EngineInterface) {
+  const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
+  if (!b) return
+  const byServer: Record<string, number> = {}
+  for (const t of b.mcpTools) { const k = mcpServer(t.name); if (k) byServer[k] = (byServer[k] ?? 0) + t.tokens }
+  const v: Ctx = { used: b.totalTokens, max: b.rawMaxTokens, rows: b.categories.map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind })), mcp: byServer }
+  const json = JSON.stringify(v)
+  if (json !== lastCtx) { lastCtx = json; await update($, ctxInfo, () => v) }
+}
+
 async function setTheme($: EngineInterface, fn: (t: ThemeState) => ThemeState) {
   const next = await update($, theme, fn)
   await $.store.set('prodash.theme', next).catch(() => undefined)
@@ -377,6 +382,11 @@ export const register: Register = on => {
   let lastUsageKey = ''
   let lastStatus = ''
 
+
+  on('session.measure', async ($, e, next) => {
+    quiet(ctxSample($))
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     flushQueued = false // a re-run of register drops the old timer
@@ -538,7 +548,8 @@ export const register: Register = on => {
       if (JSON.stringify(fresh) !== JSON.stringify(old)) await update($, mcp, () => fresh)
     }
     quiet(mcpSample())
-    $.clock.every(30000, () => quiet(mcpSample()))
+    quiet(ctxSample($))
+    $.clock.every(30000, () => quiet(Promise.all([mcpSample(), ctxSample($)])))
     const model = await $.session.model().catch(() => undefined)
     if (model) await update($, liveInfo, l => ({ ...l, model: l.model ?? model }))
     quiet(prSample().then(gitSample))
@@ -726,8 +737,6 @@ export const register: Register = on => {
       update($, usage, old => ({
       ...old,
       tokens: old.tokens + (u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0),
-      lastTurnUsd: cost !== undefined && old.usd !== undefined ? Math.max(0, cost - (old.turnBaseUsd ?? 0)) : old.lastTurnUsd,
-      turnBaseUsd: cost,
       usd: cost,
     })),
     ]).catch(() => undefined)
@@ -743,7 +752,7 @@ export const register: Register = on => {
     const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
     const W = e.props.bodyColumns
     const H = Math.max(12, e.viewport?.rows ?? 30)
-    const [s, u, fl, m, lv, gh, servers, th] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp), read($, theme)])
+    const [s, u, fl, m, lv, gh, servers, th, cx] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp), read($, theme), read($, ctxInfo)])
     pal = resolveTheme(th)
     const live = fl.filter(f => LIVE.includes(f.status))
     const count = (st: string) => live.filter(f => f.status === st).length
@@ -816,33 +825,54 @@ export const register: Register = on => {
       <Button key="a5" hotkey="5" label="THEME" onPress={go('theme')} />
     </Box>)
 
-    const MCP_ROWS = 5
-    const shownMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || b.calls - a.calls).slice(0, MCP_ROWS)
+    // Context rows first: the MCP box beside it shows as many servers as the Context box is tall
+    const CTX_COLORS = ['#5f87ff', '#ff875f', '#00af87', '#d7af00', '#af87ff', '#5fd7d7', '#d75f87', '#87af5f']
+    const ctxColor = (kind: string, i: number) => (kind === 'used' ? CTX_COLORS[i % CTX_COLORS.length]! : kind === 'buffer' ? '#6c6c6c' : '#3a3a3a')
+    const ctxInner = Math.max(8, wThird - 4)
+    const ctxPct = cx.max ? (cx.used / cx.max) * 100 : 0
+    const ctxBar = cx.rows.filter(r => r.kind === 'used').map((r, i) => ({ n: Math.round((r.tokens / (cx.max || 1)) * ctxInner), c: ctxColor('used', i) }))
+    const ctxFree = Math.max(0, ctxInner - ctxBar.reduce((n, x) => n + x.n, 0))
+    const ctxBox = box('CONTEXT', 1, <Box flexDirection="column">
+      {cx.rows.length === 0 && <Text dimColor>no breakdown yet</Text>}
+      {cx.rows.length > 0 && <Box justifyContent="space-between">
+        <Text bold>{Math.round(ctxPct)}% used</Text>
+        <Box flexShrink={0} marginLeft={1}><Text dimColor>{kTok1(cx.used)} / {kTok(cx.max)}</Text></Box>
+      </Box>}
+      {cx.rows.length > 0 && <Text wrap="truncate-end">{ctxBar.map((x, i) => <Text key={`cb-${i}`} color={tc(x.c)}>{'█'.repeat(x.n)}</Text>)}<Text dimColor>{'░'.repeat(ctxFree)}</Text></Text>}
+      {(() => { let used = 0; return cx.rows.map((r, i) => {
+        const c = ctxColor(r.kind, r.kind === 'used' ? used++ : i)
+        return (
+          <Box key={`cx-${i}`} justifyContent="space-between">
+            <Text wrap="truncate-end"><Text color={tc(c)}>■</Text> <Text dimColor={r.kind === 'deferred'}>{r.name}</Text></Text>
+            <Box flexShrink={0} marginLeft={1}><Text dimColor={r.kind === 'deferred'}>{kTok1(r.tokens)} {r.kind === 'deferred' ? '    —' : `${((r.tokens / (cx.max || 1)) * 100).toFixed(1).padStart(5)}%`}</Text></Box>
+          </Box>
+        )
+      }) })()}
+    </Box>, wThird)
+    const ctxH = 2 + Math.max(1, cx.rows.length ? cx.rows.length + 2 : 1)
+    const MCP_ROWS = Math.max(5, ctxH - 4)
+    const mcpTok = (name: string) => cx.mcp[name] ?? 0
+    const shownMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || mcpTok(b.name) - mcpTok(a.name) || b.calls - a.calls).slice(0, MCP_ROWS)
     const nConn = servers.filter(x => x.status === 'connected').length
     const nTools = servers.reduce((n, x) => n + x.tools, 0)
     const nBad = servers.filter(x => x.status === 'failed' || x.status === 'needs-auth').length
+    const allTok = Object.values(cx.mcp).reduce((n, t) => n + t, 0)
     const mcpBox = box('MCP SERVERS', 1, <Box flexDirection="column">
-      <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{nConn} connected</Text> · {nTools} tools{nBad ? <Text color={tc('#ff5f5f')}> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color={tc('#ffd75f')}> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+      <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{nConn} connected</Text> · {nTools} tools{allTok ? ` · ${kTok1(allTok)} tokens` : ''}{nBad ? <Text color={tc('#ff5f5f')}> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color={tc('#ffd75f')}> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
       {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
       {shownMcp.map(x => {
         const [g, c] = MCP_GLYPH[x.status]
         return (
           <Box key={`mcp-${x.name}`} justifyContent="space-between">
             <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> {x.name} <Text dimColor>{x.status === 'connected' ? `${x.tools} tools` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
-            <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text></Box>
+            <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text>{mcpTok(x.name) ? <Text bold>  {kTok1(mcpTok(x.name))}</Text> : ''}</Box>
           </Box>
         )
       })}
       {servers.length > MCP_ROWS && <Text dimColor>… +{servers.length - MCP_ROWS} servers</Text>}
     </Box>, W - wThird)
-    const metricsBox = box('METRICS', 1, <Box flexDirection="column">
-          <Text wrap="truncate-end">TIME {clock(now - (u.startedAt || now))}</Text>
-          <Text wrap="truncate-end">TOKENS {tokens(u.tokens)}</Text>
-          <Text wrap="truncate-end">COST ${(u.usd ?? 0).toFixed(2)}</Text>
-          <Text wrap="truncate-end">TURN ${(u.lastTurnUsd ?? 0).toFixed(2)}</Text>
-        </Box>, wThird)
-    // MCP and Session Metrics share a row: it is as tall as the taller of the two
-    const room = Math.max(3, H - 14 - Math.max(6, 3 + Math.max(1, shownMcp.length) + (servers.length > MCP_ROWS ? 1 : 0)))
+    // MCP and Context share a row: it is as tall as the taller of the two
+    const room = Math.max(3, H - 14 - Math.max(6, ctxH, 3 + Math.max(1, shownMcp.length) + (servers.length > MCP_ROWS ? 1 : 0)))
     const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
@@ -1063,7 +1093,7 @@ export const register: Register = on => {
         {header}
         <Box flexDirection="row">
           {mcpBox}
-          {metricsBox}
+          {ctxBox}
         </Box>
         {actions}
         {body}

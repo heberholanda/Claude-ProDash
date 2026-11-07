@@ -1,6 +1,6 @@
 # Pro Dash
 
-Pro Dash is a dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, cost, the git repository and the live subagents (forks). It also has views for permission checks, project progress and color themes.
+Pro Dash is a dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, the context window breakdown, the git repository and the live subagents (forks). It also has views for permission checks, project progress and color themes.
 
 ## Install
 
@@ -41,8 +41,8 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | --- | --- |
 | **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, RAM used/total, CPU history |
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
-| **MCP Servers** | connected servers and tool count; per server: status, tools, calls, errors, average latency, last use; failed, pending, needs-auth and disabled servers with their error |
-| **Metrics** | session duration, total tokens, cost, last turn cost |
+| **MCP Servers** | connected servers, tool count and the tokens their tool schemas take; per server: status, tools, calls, errors, average latency, last use, schema tokens; failed, pending, needs-auth and disabled servers with their error |
+| **Context** | the context window as `/context` breaks it down: % used, tokens used / window, a stacked bar, and each category (messages, system tools, skills, system prompt, MCP tools, memory files, autocompact buffer, free space, deferred tools) with its tokens and share |
 | **Action Bar** | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |

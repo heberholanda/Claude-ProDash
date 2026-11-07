@@ -16,10 +16,10 @@ const pane = (bodyColumns: number) => ({
 } as const)
 
 const SURFACES = ['terminal', 'desktop'] as const
-const HEADERS = ['SYSTEM STATUS', 'AGENT OVERVIEW', 'METRICS', 'ACTIVE FORKS']
+const HEADERS = ['SYSTEM STATUS', 'AGENT OVERVIEW', 'CONTEXT', 'ACTIVE FORKS']
 
 // The engine beneath the plugin; the mocked clock holds session.start's timers.
-function engine(on: On, tools: Record<string, unknown> = {}) {
+function engine(on: On, tools: Record<string, unknown> = {}, usage: unknown = { startedAt: 0, context: { percent: 10 }, rateLimits: [] }) {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   // $.tool.list() stand-in: tests push/replace entries to change what the session offers
   const list: { name: string; description: string; mcp: boolean }[] = []
@@ -32,7 +32,7 @@ function engine(on: On, tools: Record<string, unknown> = {}) {
   on('session.cwd', () => ({ value: '/p' }))
   on('turn.complete', (_, e) => ({ text: e.answer }) as never)
   on('prompt.submit', (_, e) => ({ text: e.text }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: { percent: 10 }, rateLimits: [] } as never }))
+  on('session.usage', () => ({ value: usage as never }))
   on('agent.list', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } as never }))
   // $.store stand-in: tests seed or read `store` directly
@@ -444,13 +444,36 @@ test('MCP SERVERS: box under the header row with summary and rows, 80 and 140', 
     const at = all.findIndex(t => t.includes('MCP SERVERS'))
     expect(at, `${surface} ${cols}\n${texts}`).toBeGreaterThanOrEqual(0)
     expect(at, `${surface} ${cols}: below header row`).toBeGreaterThan(all.findIndex(t => t === 'AGENT OVERVIEW'))
-    // Session Metrics shares the row, to the right of MCP
-    expect(all.findIndex(t => t === 'METRICS'), `${surface} ${cols}: metrics right of MCP`).toBeGreaterThan(at)
+    // Context shares the row, to the right of MCP
+    expect(all.findIndex(t => t === 'CONTEXT'), `${surface} ${cols}: context right of MCP`).toBeGreaterThan(at)
     for (const s of ['2 connected', '30 tools', '1 failed', 'alpha', 'beta', 'gamma', '20 tools', '10 tools', '4 calls', '1 err', 'avg 1.5s', 'boom'])
       expect(texts, `${surface} ${cols}: ${s}\n${texts}`).toContain(s)
     // beta has no calls: no avg on its row
     expect(texts.match(/avg \d+\.\d+s/g)?.length, `${surface} ${cols}: one avg only`).toBe(1)
     expect(await ui.find({ type: 'Button', key: 'a1' }), 'action bar still there').toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('CONTEXT: /context rows with tokens and share; MCP rows carry their schema tokens', async ($, on) => {
+  const breakdown = {
+    totalTokens: 198_900, rawMaxTokens: 1_000_000,
+    categories: [
+      { name: 'Messages', tokens: 159_100, kind: 'used' },
+      { name: 'Autocompact buffer', tokens: 33_000, kind: 'buffer' },
+      { name: 'Free space', tokens: 767_400, kind: 'free' },
+      { name: 'MCP tools (deferred)', tokens: 63_500, kind: 'deferred' },
+    ],
+    mcpTools: [{ name: 'mcp__alpha__a', tokens: 1_000 }, { name: 'mcp__alpha__b', tokens: 200 }, { name: 'mcp__beta__x', tokens: 300 }],
+  }
+  const { list } = engine(on, {}, { startedAt: 0, context: { percent: 20, breakdown }, rateLimits: [] })
+  list.push(mcpTool('mcp__alpha__a'), mcpTool('mcp__alpha__b'), mcpTool('mcp__beta__x'))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...pane(160), surface })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    for (const s of ['20% used', '198.9k / 1.0M', 'Messages', '159.1k', '15.9%', 'Free space', '76.7%', 'MCP tools (deferred)', '—', '1.2k', '1.5k tokens'])
+      expect(texts, `${surface}: ${s}\n${texts}`).toContain(s)
     await ui.unmount()
   }
 })
