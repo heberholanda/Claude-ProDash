@@ -5,8 +5,19 @@ export type Sys = { load?: number; memUsed?: number; memTotal?: number; hist: nu
 export type RateLimit = { kind: string; pct: number; resetsAt?: string }
 export type Usage = { startedAt: number; ctx?: number; ctxTokens?: number; ctxWindow?: number; limits?: RateLimit[]; usd?: number; tokens: number }
 /** the /context breakdown: rows as /context lists them; mcp: schema tokens per MCP server (mcp__<server>__ key) */
-export type Ctx = { used: number; max: number; rows: { name: string; tokens: number; kind: 'used' | 'free' | 'buffer' | 'deferred' }[]; mcp: Record<string, number> }
-export type Mode = 'main' | 'agents' | 'perms' | 'board' | 'theme'
+export type Ctx = {
+  used: number
+  max: number
+  rows: { name: string; tokens: number; kind: 'used' | 'free' | 'buffer' | 'deferred' }[]
+  /** per MCP server (mcp__<server>__ key): schema tokens of all its tools, how many are loaded and their tokens */
+  mcp: Record<string, { tokens: number; loaded: number; inCtx: number }>
+  memory: { path: string; type: string; tokens: number }[]
+  skills: { name: string; tokens: number }[]
+  skillsTotal: number
+  compactAt?: number
+  model: string
+}
+export type Mode = 'main' | 'agents' | 'perms' | 'board' | 'mcp' | 'context' | 'theme'
 export type Perm = { tool: string; ok: number; denied: number }
 export type Live = {
   model?: string

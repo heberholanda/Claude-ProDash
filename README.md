@@ -41,9 +41,9 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | --- | --- |
 | **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, RAM used/total, CPU history |
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
-| **MCP Servers** | connected servers, tool count and the tokens their tool schemas take; per server: status, tools, calls, errors, average latency, last use, schema tokens; failed, pending, needs-auth and disabled servers with their error |
-| **Context** | the context window as `/context` breaks it down: % used, tokens used / window, a stacked bar, and each category (messages, system tools, skills, system prompt, MCP tools, memory files, autocompact buffer, free space, deferred tools) with its tokens and share |
-| **Action Bar** | `1` Forks · `2` Permissions · `3` Board · `4` Theme · `5` Save Log |
+| **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme · `7` Log; the open view is the bright one |
+| **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
+| **Context** | % used, tokens used / window, a stacked bar, the 4 heaviest categories and the free space, with tokens and share |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
@@ -53,7 +53,7 @@ Press the key again, or **BACK**, to return to the main view.
 
 **`1` Forks**: Active Forks at full height, for when the list does not fit the main view: `main` and every subagent with its current activity, tool calls, elapsed time and tokens. Pick one to open its transcript, `main` to come back.
 
-**`2` Permissions**: every permission check of the session.
+**`2` Perms**: every permission check of the session.
 - A color strip with one square per check: allowed, approved by the auto-mode classifier, approved by you, pending, denied.
 - Totals by kind, by category (file · shell · other), reads vs writes, main vs forks.
 - Average wait for an approval and the auto-approve rate.
@@ -68,14 +68,18 @@ Press the key again, or **BACK**, to return to the main view.
 - **Background**: shells and monitors running in the background.
 - **Scheduled**: cron jobs and wakeups with their next run.
 
-**`4` Theme**: the dashboard's colors.
+**`4` MCP**: every MCP server with its status, tools loaded / total, calls, errors, average latency, last use and schema tokens, and the error of a failed one; the summary splits the tokens in context now from the deferred ones.
+
+**`5` Context**: the whole `/context` breakdown: model, autocompact threshold, every category (messages, system tools, skills, system prompt, MCP tools, memory files, autocompact buffer, free space, deferred tools) heaviest first with Free space last, the memory files with their tokens, and the skills heaviest first.
+
+**`6` Theme**: the dashboard's colors.
 - **Presets** (soft palettes): `default`, `matrix`, `dracula`, `nord`, `amber`, `cyberpunk`, `mono`, and `vivid` (bright colors).
 - **Custom**: starts from the last preset and lets you set each role (border, ok, warn, bad, info, accent, dim, text) from a list of colors or by typing `#rrggbb` + Enter. Changed roles show `*`; **RESET CUSTOM** undoes them.
 - The theme is saved across sessions.
 
 To type in the custom fields, open the pane with `/prodash` so it holds the keyboard.
 
-**`5` Save Log**: writes the session's event log (prompts, tool calls, agent events; last 500 lines) to `prodash-<timestamp>.log` in the session folder.
+**`7` Log**: writes the session's event log (prompts, tool calls, agent events; last 500 lines) to `prodash-<timestamp>.log` in the session folder.
 
 ## How it gets its data
 
@@ -85,6 +89,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | --- | --- |
 | Agents and forks | `$.agent.list()`, polled every 250 ms while a fork runs, every 1 s otherwise |
 | Context, cost, rate limits | `$.session.usage()` every 1 s, written only when a figure changes |
+| Context breakdown, MCP schema tokens | `$.session.usage({ breakdown: 'summary' })` (local estimate, no API call) after each turn and every 30 s |
 | Model, effort, requests, TTFT | each model request (`turn.step`) |
 | Permission checks | `tool.check`; an ask's outcome when its call returns |
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |

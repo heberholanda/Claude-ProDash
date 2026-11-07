@@ -455,7 +455,7 @@ function mcpSpy(on: On) {
 }
 const srv = (box: { m?: McpServer[] }, name: string) => box.m?.find(s => s.name === name)
 
-test('MCP SERVERS: box under the header row with summary and rows, 80 and 140', async ($, on) => {
+test('MCP SERVERS: compact box under the action bar; key 4 shows every detail', async ($, on) => {
   engine(on)
   on('state.get', (_, e, next) =>
     e.plugin === 'prodash' && e.key === 'mcp' ? { value: { value: { shape: 'mcp-1', value: MCP }, version: 1 } } as never : next(e))
@@ -468,29 +468,42 @@ test('MCP SERVERS: box under the header row with summary and rows, 80 and 140', 
     expect(at, `${surface} ${cols}: below header row`).toBeGreaterThan(all.findIndex(t => t === 'AGENT OVERVIEW'))
     // Context shares the row, to the right of MCP
     expect(all.findIndex(t => t === 'CONTEXT'), `${surface} ${cols}: context right of MCP`).toBeGreaterThan(at)
-    for (const s of ['2 connected', '30 tools', '1 failed', 'alpha', 'beta', 'gamma', '20 tools', '10 tools', '4 calls', '1 err', 'avg 1.5s', 'boom'])
+    for (const s of ['2 connected', '30 tools', '1 failed', 'alpha', 'beta', 'gamma'])
       expect(texts, `${surface} ${cols}: ${s}\n${texts}`).toContain(s)
-    // beta has no calls: no avg on its row
-    expect(texts.match(/avg \d+\.\d+s/g)?.length, `${surface} ${cols}: one avg only`).toBe(1)
-    expect(await ui.find({ type: 'Button', key: 'a1' }), 'action bar still there').toBeDefined()
+    // the details wait for key 4
+    expect(texts, `${surface} ${cols}: no calls in the compact box`).not.toContain('4 calls')
     // the action bar sits between the header row and the MCP / Context row
     const bar = all.findIndex(t => t === 'ACTION BAR')
     expect(bar, `${surface} ${cols}: action bar below header`).toBeGreaterThan(all.findIndex(t => t === 'AGENT OVERVIEW'))
     expect(bar, `${surface} ${cols}: action bar above MCP`).toBeLessThan(at)
+
+    await ui.press({ key: 'a4' })
+    const detail = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    for (const s of ['20 tools', '10 tools', '4 calls', '1 err', 'avg 1.5s', 'boom'])
+      expect(detail, `${surface} ${cols}: detail ${s}\n${detail}`).toContain(s)
+    // beta has no calls: no avg on its row
+    expect(detail.match(/avg \d+\.\d+s/g)?.length, `${surface} ${cols}: one avg only`).toBe(1)
+    await ui.press({ key: 'back' })
     await ui.unmount()
   }
 })
 
-test('CONTEXT: /context rows with tokens and share; MCP rows carry their schema tokens', async ($, on) => {
+test('CONTEXT: top rows and Free space in the box; key 5 shows every row, memory files and skills', async ($, on) => {
   const breakdown = {
-    totalTokens: 198_900, rawMaxTokens: 1_000_000,
+    totalTokens: 198_900, rawMaxTokens: 1_000_000, model: 'claude-opus-5-5', isAutoCompactEnabled: true, autoCompactThreshold: 967_000,
     categories: [
       { name: 'Messages', tokens: 159_100, kind: 'used' },
+      { name: 'System tools', tokens: 24_300, kind: 'used' },
+      { name: 'Skills', tokens: 7_600, kind: 'used' },
+      { name: 'System prompt', tokens: 4_300, kind: 'used' },
+      { name: 'Memory files', tokens: 1_400, kind: 'used' },
       { name: 'Autocompact buffer', tokens: 33_000, kind: 'buffer' },
       { name: 'Free space', tokens: 767_400, kind: 'free' },
       { name: 'MCP tools (deferred)', tokens: 63_500, kind: 'deferred' },
     ],
-    mcpTools: [{ name: 'mcp__alpha__a', tokens: 1_000 }, { name: 'mcp__alpha__b', tokens: 200 }, { name: 'mcp__beta__x', tokens: 300 }],
+    mcpTools: [{ name: 'mcp__alpha__a', tokens: 1_000, isLoaded: true }, { name: 'mcp__alpha__b', tokens: 200, isLoaded: false }, { name: 'mcp__beta__x', tokens: 300, isLoaded: false }],
+    memoryFiles: [{ path: 'C:/Users/me/.claude/CLAUDE.md', type: 'User', tokens: 1_400 }],
+    skills: { totalSkills: 2, includedSkills: 2, tokens: 900, skillFrontmatter: [{ name: 'tiny', tokens: 100 }, { name: 'heavy-skill', tokens: 800 }] },
   }
   const { list } = engine(on, {}, { startedAt: 0, context: { percent: 20, breakdown }, rateLimits: [] })
   list.push(mcpTool('mcp__alpha__a'), mcpTool('mcp__alpha__b'), mcpTool('mcp__beta__x'))
@@ -498,13 +511,29 @@ test('CONTEXT: /context rows with tokens and share; MCP rows carry their schema 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...pane(160), surface })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
-    for (const s of ['20% used', '198.9k / 1.0M', 'Messages', '159.1k', '15.9%', 'Free space', '76.7%', 'MCP tools (deferred)', '—', '1.2k', '1.5k tokens'])
+    for (const s of ['20% used', '198.9k / 1.0M', 'Messages', '159.1k', '15.9%', 'System prompt', 'Free space', '76.7%', '1.2k', '1.5k'])
       expect(texts, `${surface}: ${s}\n${texts}`).toContain(s)
-    // most tokens first, Free space last
-    const at = (s: string) => texts.indexOf(s)
+    // only the top 4 used rows and Free space: the 5th, the buffer and deferred rows wait for key 5
+    for (const s of ['Memory files', 'Autocompact buffer', 'MCP tools (deferred)'])
+      expect(texts, `${surface}: not ${s}`).not.toContain(s)
+
+    await ui.press({ key: 'a5' })
+    const d = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    for (const s of ['Opus 5.5', 'autocompact at 967.0k', 'Memory files', 'Autocompact buffer', 'MCP tools (deferred)', '—',
+      'MEMORY FILES', '~/.claude/CLAUDE.md', 'SKILLS', 'heavy-skill'])
+      expect(d, `${surface}: detail ${s}\n${d}`).toContain(s)
+    // most tokens first, Free space last; heaviest skill first
+    const at = (s: string) => d.indexOf(s)
     expect(at('Messages')).toBeLessThan(at('MCP tools (deferred)'))
     expect(at('MCP tools (deferred)')).toBeLessThan(at('Autocompact buffer'))
     expect(at('Autocompact buffer')).toBeLessThan(at('Free space'))
+    // the compact boxes give their room to the detail view
+    expect(d).not.toContain('MCP SERVERS')
+    await ui.press({ key: 'a4' })
+    const m = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(m, `${surface}: mcp detail\n${m}`).toContain('1.0k in context now, 0.5k deferred')
+    expect(m).toContain('1/2 tools loaded')
+    await ui.press({ key: 'back' })
     await ui.unmount()
   }
 })
@@ -620,23 +649,23 @@ const PRESETS = ['default', 'matrix', 'dracula', 'nord', 'amber', 'cyberpunk', '
 const ROLES = ['border', 'ok', 'warn', 'bad', 'info', 'accent', 'dim', 'white']
 
 async function openTheme(ui: any, label: string) {
-  await ui.press({ key: 'a4' })
+  await ui.press({ key: 'a6' })
   expect(await ui.find({ type: 'Text', text: /THEME/ }), `${label}: THEME view`).toBeDefined()
 }
 
-test('action bar is a titled box with a1..a5 in order: FORKS, PERMISSIONS, BOARD, THEME, SAVE LOG', async ($, on) => {
+test('action bar is a titled box with a1..a7 in order', async ($, on) => {
   engine(on)
   for (const surface of SURFACES) for (const cols of [80, 160]) {
     const ui = await $.ui.mount({ ...pane(cols), surface })
     expect(await ui.find({ type: 'Text', text: 'ACTION BAR' }), `${surface} ${cols}: title`).toBeDefined()
-    for (const k of ['a1', 'a2', 'a3', 'a4', 'a5']) expect(await ui.find({ type: 'Button', key: k }), `${surface} ${cols}: ${k}`).toBeDefined()
-    const labels = await Promise.all(['a1', 'a2', 'a3', 'a4', 'a5'].map(async k => { const b = await ui.find({ type: 'Button', key: k }); return String(b?.props.label ?? b?.text) }))
-    expect(labels, `${surface} ${cols}: labels`).toEqual(['FORKS', 'PERMISSIONS', 'BOARD', 'THEME', 'SAVE LOG'])
+    const keys = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+    const labels = await Promise.all(keys.map(async k => { const b = await ui.find({ type: 'Button', key: k }); return String(b?.props.label ?? b?.text) }))
+    expect(labels, `${surface} ${cols}: labels`).toEqual(['Forks', 'Perms', 'Board', 'MCP', 'Context', 'Theme', 'Log'])
     await ui.unmount()
   }
 })
 
-test('a5 opens THEME: every preset, custom, current marked ●; back returns', async ($, on) => {
+test('a6 opens THEME: every preset, custom, current marked ●; back returns', async ($, on) => {
   engine(on)
   seedTheme(on, { name: 'nord', base: 'nord', custom: {} })
   for (const surface of SURFACES) {

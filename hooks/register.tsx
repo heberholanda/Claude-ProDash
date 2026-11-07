@@ -26,7 +26,7 @@ const requests = atom({ plugin: 'prodash', key: 'requests' } as const, [] as Req
 const plan = atom({ plugin: 'prodash', key: 'plan' } as const, null as Plan | null, { shape: 'plan-1' })
 const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 'bg-1' })
 const mcp = atom({ plugin: 'prodash', key: 'mcp' } as const, [] as McpServer[], { shape: 'mcp-1' })
-const ctxInfo = atom({ plugin: 'prodash', key: 'ctx' } as const, { used: 0, max: 0, rows: [], mcp: {} } as Ctx, { shape: 'ctx-1' })
+const ctxInfo = atom({ plugin: 'prodash', key: 'ctx' } as const, { used: 0, max: 0, rows: [], mcp: {}, memory: [], skills: [], skillsTotal: 0, model: '' } as Ctx, { shape: 'ctx-2' })
 const theme = atom({ plugin: 'prodash', key: 'theme' } as const, { name: 'default', base: 'default', custom: {} } as ThemeState, { shape: 'theme-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
@@ -276,10 +276,21 @@ let lastCtx = ''
 async function ctxSample($: EngineInterface) {
   const b = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
   if (!b) return
-  const byServer: Record<string, number> = {}
-  for (const t of b.mcpTools) { const k = mcpServer(t.name); if (k) byServer[k] = (byServer[k] ?? 0) + t.tokens }
+  const byServer: Ctx['mcp'] = {}
+  for (const t of b.mcpTools) {
+    const k = mcpServer(t.name)
+    if (!k) continue
+    const x = (byServer[k] ??= { tokens: 0, loaded: 0, inCtx: 0 })
+    x.tokens += t.tokens
+    if (t.isLoaded) { x.loaded++; x.inCtx += t.tokens }
+  }
   const v: Ctx = { used: b.totalTokens, max: b.rawMaxTokens, rows: b.categories.map(c => ({ name: c.name, tokens: c.tokens, kind: c.kind }))
-    .sort((a, z) => Number(a.kind === 'free') - Number(z.kind === 'free') || z.tokens - a.tokens), mcp: byServer }
+    .sort((a, z) => Number(a.kind === 'free') - Number(z.kind === 'free') || z.tokens - a.tokens), mcp: byServer,
+    memory: b.memoryFiles.map(f => ({ path: f.path, type: f.type, tokens: f.tokens })).sort((a, z) => z.tokens - a.tokens),
+    skills: (b.skills?.skillFrontmatter ?? []).map(k => ({ name: k.name, tokens: k.tokens })).sort((a, z) => z.tokens - a.tokens).slice(0, 30),
+    skillsTotal: b.skills?.totalSkills ?? 0,
+    compactAt: b.isAutoCompactEnabled ? b.autoCompactThreshold : undefined,
+    model: b.model }
   const json = JSON.stringify(v)
   if (json !== lastCtx) { lastCtx = json; await update($, ctxInfo, () => v) }
 }
@@ -812,62 +823,74 @@ export const register: Register = on => {
       }
     }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
-    const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-around" flexWrap="wrap">
-      <Button key="a1" hotkey="1" label="FORKS" onPress={go('agents')} />
-      <Button key="a2" hotkey="2" label="PERMISSIONS" onPress={go('perms')} />
-      <Button key="a3" hotkey="3" label="BOARD" onPress={go('board')} />
-      <Button key="a4" hotkey="4" label="THEME" onPress={go('theme')} />
-      <Button key="a5" hotkey="5" label="SAVE LOG" onPress={save} />
+    // plain buttons draw as `1: Forks`, so all seven fit one row; the open view is the bright one
+    const ACTIONS: [string, Mode | 'log'][] = [['Forks', 'agents'], ['Perms', 'perms'], ['Board', 'board'], ['MCP', 'mcp'], ['Context', 'context'], ['Theme', 'theme'], ['Log', 'log']]
+    const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap">
+      {ACTIONS.map(([label, to], i) => (
+        <Button key={`a${i + 1}`} hotkey={String(i + 1)} label={label} plain dimColor={m !== to} onPress={to === 'log' ? save : go(to)} />
+      ))}
     </Box>)
 
-    // Context rows first: the MCP box beside it shows as many servers as the Context box is tall
+    // ---- Context / MCP: the main view shows the top rows of each at equal size; keys 4 and 5 show everything
+    const TOP = 4
+    const half = Math.floor(W / 2)
     const CTX_COLORS = ['#5f87ff', '#ff875f', '#00af87', '#d7af00', '#af87ff', '#5fd7d7', '#d75f87', '#87af5f']
-    const ctxColor = (kind: string, i: number) => (kind === 'used' ? CTX_COLORS[i % CTX_COLORS.length]! : kind === 'buffer' ? '#6c6c6c' : '#3a3a3a')
-    const ctxInner = Math.max(8, wThird - 4)
-    const ctxPct = cx.max ? (cx.used / cx.max) * 100 : 0
-    const ctxBar = cx.rows.filter(r => r.kind === 'used').map((r, i) => ({ n: Math.round((r.tokens / (cx.max || 1)) * ctxInner), c: ctxColor('used', i) }))
-    const ctxFree = Math.max(0, ctxInner - ctxBar.reduce((n, x) => n + x.n, 0))
+    const usedRows = cx.rows.filter(r => r.kind === 'used')
+    const colorOf = (r: Ctx['rows'][number]) => (r.kind === 'used' ? CTX_COLORS[usedRows.indexOf(r) % CTX_COLORS.length]! : r.kind === 'buffer' ? '#6c6c6c' : '#3a3a3a')
+    const pctOf = (n: number) => `${((n / (cx.max || 1)) * 100).toFixed(1)}%`
+    const ctxPct = cx.max ? Math.round((cx.used / cx.max) * 100) : 0
+    const stack = (width: number) => {
+      const parts = usedRows.map(r => ({ n: Math.round((r.tokens / (cx.max || 1)) * width), c: colorOf(r) }))
+      const free = Math.max(0, width - parts.reduce((n, x) => n + x.n, 0))
+      return <Text wrap="truncate-end">{parts.map((x, i) => <Text key={`cb-${i}`} color={tc(x.c)}>{'█'.repeat(x.n)}</Text>)}<Text dimColor>{'░'.repeat(free)}</Text></Text>
+    }
+    const ctxRow = (r: Ctx['rows'][number], i: number) => (
+      <Box key={`cx-${i}`} justifyContent="space-between">
+        <Text wrap="truncate-end"><Text color={tc(colorOf(r))}>■</Text> <Text dimColor={r.kind !== 'used'}>{r.name}</Text></Text>
+        <Box flexShrink={0} marginLeft={1}><Text dimColor={r.kind === 'deferred'}>{kTok1(r.tokens).padStart(6)} {(r.kind === 'deferred' ? '—' : pctOf(r.tokens)).padStart(5)}</Text></Box>
+      </Box>
+    )
+    const ctxHead = (
+      <Box justifyContent="space-between">
+        <Text bold wrap="truncate-end">{ctxPct}% used</Text>
+        <Box flexShrink={0} marginLeft={1}><Text dimColor>{kTok1(cx.used)} / {kTok(cx.max)}</Text></Box>
+      </Box>
+    )
+    const freeRow = cx.rows.find(r => r.kind === 'free')
     const ctxBox = box('CONTEXT', 1, <Box flexDirection="column">
       {cx.rows.length === 0 && <Text dimColor>no breakdown yet</Text>}
-      {cx.rows.length > 0 && <Box justifyContent="space-between">
-        <Text bold>{Math.round(ctxPct)}% used</Text>
-        <Box flexShrink={0} marginLeft={1}><Text dimColor>{kTok1(cx.used)} / {kTok(cx.max)}</Text></Box>
-      </Box>}
-      {cx.rows.length > 0 && <Text wrap="truncate-end">{ctxBar.map((x, i) => <Text key={`cb-${i}`} color={tc(x.c)}>{'█'.repeat(x.n)}</Text>)}<Text dimColor>{'░'.repeat(ctxFree)}</Text></Text>}
-      {(() => { let used = 0; return cx.rows.map((r, i) => {
-        const c = ctxColor(r.kind, r.kind === 'used' ? used++ : i)
-        return (
-          <Box key={`cx-${i}`} justifyContent="space-between">
-            <Text wrap="truncate-end"><Text color={tc(c)}>■</Text> <Text dimColor={r.kind === 'deferred'}>{r.name}</Text></Text>
-            <Box flexShrink={0} marginLeft={1}><Text dimColor={r.kind === 'deferred'}>{kTok1(r.tokens)} {r.kind === 'deferred' ? '    —' : `${((r.tokens / (cx.max || 1)) * 100).toFixed(1).padStart(5)}%`}</Text></Box>
-          </Box>
-        )
-      }) })()}
-    </Box>, wThird)
-    const ctxH = 2 + Math.max(1, cx.rows.length ? cx.rows.length + 2 : 1)
-    const MCP_ROWS = Math.max(5, ctxH - 4)
-    const mcpTok = (name: string) => cx.mcp[name] ?? 0
-    const shownMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || mcpTok(b.name) - mcpTok(a.name) || b.calls - a.calls).slice(0, MCP_ROWS)
+      {cx.rows.length > 0 && ctxHead}
+      {cx.rows.length > 0 && stack(Math.max(8, half - 4))}
+      {usedRows.slice(0, TOP).map((r, i) => ctxRow(r, i))}
+      {freeRow && ctxRow(freeRow, 99)}
+    </Box>, half)
+
+    const mcpTok = (name: string) => cx.mcp[name]?.tokens ?? 0
+    const sortedMcp = [...servers].sort((a, b) => (a.status === 'connected' ? 1 : 0) - (b.status === 'connected' ? 1 : 0) || mcpTok(b.name) - mcpTok(a.name) || b.calls - a.calls)
     const nConn = servers.filter(x => x.status === 'connected').length
     const nTools = servers.reduce((n, x) => n + x.tools, 0)
     const nBad = servers.filter(x => x.status === 'failed' || x.status === 'needs-auth').length
-    const allTok = Object.values(cx.mcp).reduce((n, t) => n + t, 0)
+    const allTok = Object.values(cx.mcp).reduce((n, t) => n + t.tokens, 0)
+    const inCtxTok = Object.values(cx.mcp).reduce((n, t) => n + t.inCtx, 0)
+    const mcpSummary = <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{nConn} connected</Text> · {nTools} tools{allTok ? ` · ${kTok1(allTok)}` : ''}{nBad ? <Text color={tc('#ff5f5f')}> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color={tc('#ffd75f')}> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+    const MCP_TOP = TOP + 1 // the Context box has a bar line the MCP box does not
     const mcpBox = box('MCP SERVERS', 1, <Box flexDirection="column">
-      <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{nConn} connected</Text> · {nTools} tools{allTok ? ` · ${kTok1(allTok)} tokens` : ''}{nBad ? <Text color={tc('#ff5f5f')}> · {nBad} failed</Text> : ''}{servers.length - nConn - nBad > 0 ? <Text color={tc('#ffd75f')}> · {servers.length - nConn - nBad} other</Text> : ''}</Text>
+      {mcpSummary}
       {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
-      {shownMcp.map(x => {
+      {sortedMcp.slice(0, MCP_TOP).map(x => {
         const [g, c] = MCP_GLYPH[x.status]
         return (
           <Box key={`mcp-${x.name}`} justifyContent="space-between">
-            <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> {x.name} <Text dimColor>{x.status === 'connected' ? `${x.tools} tools` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
-            <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text>{mcpTok(x.name) ? <Text bold>  {kTok1(mcpTok(x.name))}</Text> : ''}</Box>
+            <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> {x.name}</Text>
+            <Box flexShrink={0} marginLeft={1}>{x.status === 'connected' ? <Text>{(cx.mcp[x.name] ? kTok1(mcpTok(x.name)) : '—').padStart(6)}</Text> : <Text color={tc(c)}>{x.status}</Text>}</Box>
           </Box>
         )
       })}
-      {servers.length > MCP_ROWS && <Text dimColor>… +{servers.length - MCP_ROWS} servers</Text>}
-    </Box>, W - wThird)
-    // MCP and Context share a row: it is as tall as the taller of the two
-    const room = Math.max(3, H - 14 - Math.max(6, ctxH, 3 + Math.max(1, shownMcp.length) + (servers.length > MCP_ROWS ? 1 : 0)))
+      {servers.length > MCP_TOP && <Text dimColor>… +{servers.length - MCP_TOP} more · 4 for all</Text>}
+    </Box>, W - half)
+    // the MCP / Context row (TOP + 3 lines and two borders), left out where its own detail view is open
+    const hasRow = m !== 'mcp' && m !== 'context'
+    const room = Math.max(3, H - 14 - (hasRow ? TOP + 5 : 0))
     const back = <Button key="back" label="BACK" onPress={() => update($, mode, () => 'main' as Mode)} />
     let body: RenderChildren
 
@@ -960,6 +983,55 @@ export const register: Register = on => {
         {recent.length === 0 && <Text dimColor>nothing asked or denied yet</Text>}
         {recent.map(x => (
           <Text wrap="truncate-end"><Text color={tc('#6c6c6c')}>[{hhmmss(x.at)}]</Text> <Text color={tc(GATE_COLOR[x.kind])}>{VIA[x.kind]}</Text> {x.tool} <Text dimColor>{x.detail}</Text>{x.waitMs !== undefined ? <Text dimColor> · {(x.waitMs / 1000).toFixed(1)}s</Text> : ''}{x.reason && x.kind === 'd' ? <Text color={tc('#ff875f')}> — {x.reason}</Text> : ''}</Text>
+        ))}
+        {back}
+      </Box>)
+    } else if (m === 'mcp') {
+      // every server: status, tools loaded / total, calls, errors, latency, last use, schema tokens and what of them is in context now
+      body = box('MCP', 1, <Box flexDirection="column">
+        <Text wrap="truncate-end">{mcpSummary}{allTok ? <Text dimColor> · {kTok1(inCtxTok)} in context now, {kTok1(allTok - inCtxTok)} deferred</Text> : ''}</Text>
+        {servers.length === 0 && <Text dimColor>no MCP servers connected</Text>}
+        {sortedMcp.slice(0, Math.max(2, room - 3)).map(x => {
+          const [g, c] = MCP_GLYPH[x.status]
+          const t = cx.mcp[x.name]
+          return (
+            <Box key={`mcpd-${x.name}`} justifyContent="space-between">
+              <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> <Text bold>{x.name}</Text> <Text dimColor>{x.status === 'connected' ? `${t ? `${t.loaded}/` : ''}${x.tools} tools loaded` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
+              <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text><Text bold>{(t ? kTok1(t.tokens) : '—').padStart(7)}</Text></Box>
+            </Box>
+          )
+        })}
+        {servers.length > Math.max(2, room - 3) && <Text dimColor>… +{servers.length - Math.max(2, room - 3)} servers</Text>}
+        {back}
+      </Box>)
+    } else if (m === 'context') {
+      // every category, then memory files and the heaviest skills
+      const rowsN = cx.rows.length
+      const left = Math.max(2, room - rowsN - 8)
+      const memN = Math.min(cx.memory.length, Math.max(1, Math.floor(left / 2)))
+      const skillN = Math.min(cx.skills.length, Math.max(1, left - memN))
+      const home = (p: string) => p.replace(/\\/g, '/').replace(/^.*\/(\.claude\/.*)$/, '~/$1')
+      body = box('CONTEXT', 1, <Box flexDirection="column">
+        {rowsN === 0 && <Text dimColor>no breakdown yet</Text>}
+        {rowsN > 0 && <Box justifyContent="space-between">
+          <Text bold wrap="truncate-end">{ctxPct}% used <Text dimColor>· {cx.model ? modelName(cx.model) : ''}{cx.compactAt ? ` · autocompact at ${kTok1(cx.compactAt)}` : ' · autocompact off'}</Text></Text>
+          <Box flexShrink={0} marginLeft={1}><Text dimColor>{kTok1(cx.used)} / {kTok(cx.max)}</Text></Box>
+        </Box>}
+        {rowsN > 0 && stack(Math.max(8, W - 4))}
+        {cx.rows.map((r, i) => ctxRow(r, i))}
+        {cx.memory.length > 0 && <Text bold>MEMORY FILES <Text dimColor>{cx.memory.length} · {kTok1(cx.memory.reduce((n, f) => n + f.tokens, 0))}</Text></Text>}
+        {cx.memory.slice(0, memN).map((f, i) => (
+          <Box key={`mem-${i}`} justifyContent="space-between">
+            <Text wrap="truncate-start"><Text dimColor>{f.type.padEnd(8)}</Text>{home(f.path)}</Text>
+            <Box flexShrink={0} marginLeft={1}><Text>{kTok1(f.tokens).padStart(6)}</Text></Box>
+          </Box>
+        ))}
+        {cx.skills.length > 0 && <Text bold>SKILLS <Text dimColor>{cx.skillsTotal} · heaviest first</Text></Text>}
+        {cx.skills.slice(0, skillN).map((k, i) => (
+          <Box key={`sk-${i}`} justifyContent="space-between">
+            <Text wrap="truncate-end">{k.name}</Text>
+            <Box flexShrink={0} marginLeft={1}><Text>{kTok1(k.tokens).padStart(6)}</Text></Box>
+          </Box>
         ))}
         {back}
       </Box>)
@@ -1088,10 +1160,10 @@ export const register: Register = on => {
       <Box flexDirection="column" width={W}>
         {header}
         {actions}
-        <Box flexDirection="row">
+        {hasRow && <Box flexDirection="row">
           {mcpBox}
           {ctxBox}
-        </Box>
+        </Box>}
         {body}
       </Box>
     )
