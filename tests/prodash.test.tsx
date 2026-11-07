@@ -176,7 +176,7 @@ test('ACTIVE FORKS shows the activity of a live fork, not of an ended one', asyn
   await ui.unmount()
 })
 
-test('AGENT SELECT is Active Forks full screen, with each fork\'s tool calls', async ($, on) => {
+test('FORKS view is Active Forks full screen, with each fork\'s tool calls', async ($, on) => {
   engine(on)
   const viewed: unknown[] = []
   on('ui.view', (_, e) => { viewed.push(e); return { value: {} } })
@@ -187,7 +187,7 @@ test('AGENT SELECT is Active Forks full screen, with each fork\'s tool calls', a
     : next(e))
   const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join(' ')
-  expect(texts).toContain('AGENT SELECT')
+  expect(texts).toContain('FORKS — opens the agent transcript')
   expect(texts).not.toContain('ACTIVE FORKS')
   expect(texts).toContain('Counting deposits')
   expect(texts).toContain('job a2')

@@ -813,7 +813,7 @@ export const register: Register = on => {
     }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
     const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-around" flexWrap="wrap">
-      <Button key="a1" hotkey="1" label="AGENT SELECT" onPress={go('agents')} />
+      <Button key="a1" hotkey="1" label="FORKS" onPress={go('agents')} />
       <Button key="a2" hotkey="2" label="GATE PERMS" onPress={go('perms')} />
       <Button key="a3" hotkey="3" label="SAVE LOG" onPress={save} />
       <Button key="a4" hotkey="4" label="PROJECT BOARD" onPress={go('board')} />
@@ -908,7 +908,7 @@ export const register: Register = on => {
     if (m === 'agents') {
       // Active Forks at full height, with each fork's tool calls
       const limit = Math.max(2, room - 4)
-      body = box('AGENT SELECT — opens the agent transcript', 1, <Box flexDirection="column">
+      body = box('FORKS — opens the agent transcript', 1, <Box flexDirection="column">
         {forkRows(limit, true)}
         {fl.length === 0 && <Text dimColor>No subagents in this session.</Text>}
         {fl.length > limit && <Text dimColor>… +{fl.length - limit} earlier</Text>}

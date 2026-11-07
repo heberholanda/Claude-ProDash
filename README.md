@@ -43,7 +43,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
 | **MCP Servers** | connected servers, tool count and the tokens their tool schemas take; per server: status, tools, calls, errors, average latency, last use, schema tokens; failed, pending, needs-auth and disabled servers with their error |
 | **Context** | the context window as `/context` breaks it down: % used, tokens used / window, a stacked bar, and each category (messages, system tools, skills, system prompt, MCP tools, memory files, autocompact buffer, free space, deferred tools) with its tokens and share |
-| **Action Bar** | `1` Agent Select · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
+| **Action Bar** | `1` Forks · `2` Gate Perms · `3` Save Log · `4` Project Board · `5` Theme |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
@@ -51,7 +51,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 
 Press the key again, or **BACK**, to return to the main view.
 
-**`1` Agent Select**: Active Forks at full height, for when the list does not fit the main view: `main` and every subagent with its current activity, tool calls, elapsed time and tokens. Pick one to open its transcript, `main` to come back.
+**`1` Forks**: Active Forks at full height, for when the list does not fit the main view: `main` and every subagent with its current activity, tool calls, elapsed time and tokens. Pick one to open its transcript, `main` to come back.
 
 **`2` Gate Perms**: every permission check of the session.
 - A color strip with one square per check: allowed, approved by the auto-mode classifier, approved by you, pending, denied.
