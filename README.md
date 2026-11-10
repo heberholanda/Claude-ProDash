@@ -42,7 +42,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | Section | Shows |
 | --- | --- |
 | **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, RAM used/total, CPU history |
-| **Agent Overview** | model · branch, busy/idle, effort level, permission mode, context window bar with tokens used/window and compactions, session cost and request count, 5h and weekly rate limits with % used and time to reset |
+| **Agent Overview** | model · branch, busy/idle, effort level, permission mode, context window bar with tokens used/window and compactions, session cost and request count, one row each for the 5h round and the weekly limit: % used, reset time and time left (`no reading yet` until the API reports that window) |
 | **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme; the open view is the bright one |
 | **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
 | **Context** | % used, tokens used / window, a stacked bar, the 4 heaviest categories and the free space, with tokens and share |

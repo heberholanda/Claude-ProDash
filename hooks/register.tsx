@@ -112,6 +112,11 @@ const until = (iso: string | undefined, now: number) => {
   const m = Math.max(0, Math.round((Date.parse(iso) - now) / 60000))
   return m >= 1440 ? `${Math.floor(m / 1440)}d${Math.floor((m % 1440) / 60)}h` : `${Math.floor(m / 60)}h${m % 60}m`
 }
+// ISO reset time -> local "14:30", or "Thu 14:30" with the weekday
+const resetAt = (iso: string, withDay: boolean) => {
+  const d = new Date(iso)
+  return `${withDay ? `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()]} ` : ''}${d.toTimeString().slice(0, 5)}`
+}
 
 const FILE_TOOLS = ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']
 const SHELL_TOOLS = ['Bash', 'PowerShell']
@@ -792,13 +797,15 @@ export const register: Register = on => {
             <Text wrap="truncate-end" color={tc('#ff875f')} bold>{lv.model ? modelName(lv.model) : '—'}{gh.branch ? ` · ${gh.branch}` : ''}</Text>
             <Text color={tc(lv.isBusy ? '#5fd75f' : '#8a8a8a')}>{lv.isBusy ? '● busy' : '○ idle'}</Text>
           </Box>
-          <Text wrap="truncate-end">effort <Text color={tc('#ff875f')}>{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}</Text>
+          <Text wrap="truncate-end">effort <Text color={tc('#ff875f')}>{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}  <Text bold>${(u.usd ?? 0).toFixed(2)}</Text> <Text dimColor>· {lv.reqs} req</Text></Text>
           <Text wrap="truncate-end">ctx <Text color={tc('#ff875f')}>{bar(u.ctx ?? 0, Math.max(4, Math.min(12, wide - 28)))}</Text> <Text bold>{u.ctx ?? 0}%</Text> {u.ctxTokens !== undefined && u.ctxWindow ? `${kTok(u.ctxTokens)}/${kTok(u.ctxWindow)}` : ''}{lv.compactions ? <Text color={tc('#ffd75f')}> ↺{lv.compactions}</Text> : ''}</Text>
-          <Text wrap="truncate-end">cost <Text bold>${(u.usd ?? 0).toFixed(2)}</Text> <Text dimColor>· {lv.reqs} requests</Text></Text>
-          <Text wrap="truncate-end">limits{(u.limits ?? []).length ? '' : <Text dimColor> —</Text>}{(u.limits ?? []).map((r, i) => {
-            const label = r.kind === 'five_hour' ? '5h' : r.kind === 'seven_day' ? 'week' : r.kind
-            return <Text key={`lim-${i}`}>{i ? <Text dimColor> ·</Text> : ''} {label} <Text bold color={tc(loadColor(r.pct))}>{Math.round(r.pct)}%</Text> <Text dimColor>(resets {until(r.resetsAt, now)})</Text></Text>
-          })}</Text>
+          {/* one row per window, both always drawn; the API reports a window only once a response carried its reading */}
+          {([['five_hour', '5h  '], ['seven_day', 'week']] as const).map(([kind, label]) => {
+            const r = (u.limits ?? []).find(x => x.kind === kind)
+            return <Text key={`lim-${kind}`} wrap="truncate-end">{label} {r
+              ? <Text><Text color={tc(loadColor(r.pct))}>{bar(r.pct, 5)}</Text> <Text bold color={tc(loadColor(r.pct))}>{`${Math.round(r.pct)}%`.padStart(4)}</Text>{r.resetsAt ? <Text dimColor>  resets {resetAt(r.resetsAt, kind === 'seven_day')} ({until(r.resetsAt, now)})</Text> : ''}</Text>
+              : <Text dimColor>no reading yet</Text>}</Text>
+          })}
         </Box>, W - wThird)}
       </Box>
     )

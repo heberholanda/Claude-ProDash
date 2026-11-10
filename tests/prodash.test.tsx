@@ -53,11 +53,14 @@ test('resize: narrow and wide both draw every header', async ($, on) => {
   }
 })
 
-test('agent overview: labelled cost and limits lines, no ttft', async ($, on) => {
-  engine(on, {}, { startedAt: 0, context: { percent: 10 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: 1_700_000_000_000 + 3_600_000 }, { kind: 'seven_day', percentUsed: 4, resetsAt: 1_700_000_000_000 + 2 * 86_400_000 }] })
+test('agent overview: a row for the 5h round and the week, with % and reset; no ttft', async ($, on) => {
+  engine(on)
+  const limits = [{ kind: 'seven_day', pct: 4, resetsAt: new Date(1_700_000_000_000 + 2 * 86_400_000).toISOString() }]
+  on('state.get', (_, e, next) =>
+    e.key === 'usage' ? { value: { value: { shape: 'usage-2', value: { startedAt: 0, tokens: 0, usd: 12.5, limits } }, version: 1 } } as never : next(e))
   const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
-  for (const s of ['cost $', 'requests', 'limits']) expect(texts, s).toContain(s)
+  for (const s of ['$12.50', 'req', '5h', 'no reading yet', 'week', '4%', 'resets']) expect(texts, `${s}\n${texts}`).toContain(s)
   expect(texts).not.toContain('ttft')
   await ui.unmount()
 })
