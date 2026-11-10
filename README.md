@@ -26,7 +26,7 @@ In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add 
 
 | Feature | Needs |
 | --- | --- |
-| CPU / RAM in System Status | Windows (PowerShell + CIM). Other systems show `n/a`. |
+| CPU / GPU / RAM in System Status | Windows (PowerShell + CIM). Other systems, or no GPU counters, show `n/a`. |
 | GitHub section | `git` on the PATH and a git repository as the session folder |
 | Pull request in GitHub section | [`gh`](https://cli.github.com/) installed and signed in |
 | 5h / 7d rate limits | a Claude subscription (the API has no such windows) |
@@ -41,7 +41,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 
 | Section | Shows |
 | --- | --- |
-| **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, RAM used/total, CPU history |
+| **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, GPU bar (busiest engine, as Task Manager shows it), RAM used/total, CPU history |
 | **Agent Overview** | model · branch, busy/idle, effort level, permission mode, context window bar with tokens used/window and compactions, session cost and request count, one row each for the 5h round and the weekly limit: % used, reset time and time left (`no reading yet` until the API reports that window) |
 | **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme; the open view is the bright one |
 | **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
@@ -94,7 +94,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Permission checks | `tool.check`; an ask's outcome when its call returns |
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |
-| CPU / RAM | one PowerShell CIM query every 15 s |
+| CPU / GPU / RAM | one PowerShell CIM query every 15 s |
 | Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and `gh pr view` every 60 s |
 
 ### Limitations

@@ -480,13 +480,17 @@ export const register: Register = on => {
       sysBusy = true
       const r = await $.process.run(
         ['powershell', '-NoProfile', '-Command',
-          '$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"'],
+          // GPU as Task Manager shows it: each engine type's utilization summed, the busiest type wins; -1 when no counters
+          '$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;' +
+          "$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match 'engtype_'}|Group-Object {$_.Name -replace '.*engtype_',''}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};" +
+          '"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"'],
         { timeoutMs: 8000 },
       ).catch(() => undefined).finally(() => { sysBusy = false })
-      const [c, total, free] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
+      const [c, total, free, gp] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
       if (c === undefined || Number.isNaN(c)) return
       await update($, sys, s => ({
         load: c,
+        gpu: gp === undefined || Number.isNaN(gp) || gp < 0 ? undefined : gp,
         memTotal: (total ?? 0) / 1048576,
         memUsed: ((total ?? 0) - (free ?? 0)) / 1048576,
         hist: push(s.hist, c),
@@ -789,6 +793,7 @@ export const register: Register = on => {
         {box('SYSTEM STATUS', 1, <Box flexDirection="column">
           <Text wrap="truncate-end"><Text color={tc(status === 'ONLINE' ? '#5fd75f' : status === 'DEGRADED' ? '#ff5f5f' : '#ffd75f')}>● {status}</Text></Text>
           <Text wrap="truncate-end">CPU <Text color={tc(loadColor(load))}>{bar(load, Math.max(3, inner - 9))}</Text> {s.load === undefined ? 'n/a' : `${load}%`}</Text>
+          <Text wrap="truncate-end">GPU <Text color={tc(loadColor(s.gpu ?? 0))}>{bar(s.gpu ?? 0, Math.max(3, inner - 9))}</Text> {s.gpu === undefined ? 'n/a' : `${s.gpu}%`}</Text>
           <Text wrap="truncate-end">RAM {s.memTotal ? `${(s.memUsed ?? 0).toFixed(1)}/${s.memTotal.toFixed(0)}G` : 'n/a'}</Text>
           <Text wrap="truncate-end"><Text color={tc('#5fd75f')}>{spark(s.hist, inner)}</Text></Text>
         </Box>, wThird)}

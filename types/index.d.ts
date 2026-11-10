@@ -1,7 +1,7 @@
 export type Level = 'INFO' | 'SUCCESS' | 'USER' | 'WARN' | 'ERROR'
 export type LogLine = { at: number; level: Level; text: string; isSub: boolean }
 export type Fork = { id: string; name: string; status: string; since: number; tools: number; lastIn: number; out: number; act?: string }
-export type Sys = { load?: number; memUsed?: number; memTotal?: number; hist: number[] }
+export type Sys = { load?: number; gpu?: number; memUsed?: number; memTotal?: number; hist: number[] }
 export type RateLimit = { kind: string; pct: number; resetsAt?: string }
 export type Usage = { startedAt: number; ctx?: number; ctxTokens?: number; ctxWindow?: number; limits?: RateLimit[]; usd?: number; tokens: number }
 /** the /context breakdown: rows as /context lists them; mcp: schema tokens per MCP server (mcp__<server>__ key) */

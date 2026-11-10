@@ -65,6 +65,22 @@ test('agent overview: a row for the 5h round and the week, with % and reset; no 
   await ui.unmount()
 })
 
+test('GPU row shows its % or n/a without a reading', async ($, on) => {
+  engine(on)
+  let gpu: number | undefined = 42
+  on('state.get', (_, e, next) =>
+    e.key === 'sys' ? { value: { value: { shape: 'sys-1', value: { load: 5, gpu, hist: [5] } }, version: 1 } } as never : next(e))
+  for (const want of ['GPU', '42%']) {
+    const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain(want)
+    await ui.unmount()
+  }
+  gpu = undefined
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^GPU .* n\/a$/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('CPU 100% shows DEGRADED', async ($, on) => {
   engine(on)
   on('state.get', (_, e, next) =>
