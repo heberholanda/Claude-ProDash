@@ -572,21 +572,14 @@ export const register: Register = on => {
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
-  // Each model request: count it, note model/effort, time its first chunk (TTFT).
+  // Each model request: count it, note model/effort.
   on('turn.step', async function* ($, e, next) {
-    const t0 = Date.now()
     reqsDelta++
     if (!e.agentId) livePatch = { ...livePatch, model: e.model, ...(e.effort === undefined ? {} : { effort: String(e.effort) }) }
     markDirty($, 'live')
     const it = next(e)
-    let first = true
     let step = await it.next()
     while (!step.done) {
-      if (first && !e.agentId) {
-        first = false
-        livePatch = { ...livePatch, ttftMs: Date.now() - t0 }
-        markDirty($, 'live')
-      }
       const c = step.value as { kind?: string; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | null }
       if (e.agentId && c.kind === 'stop' && c.usage) {
         const u = c.usage
@@ -761,8 +754,6 @@ export const register: Register = on => {
     const [s, u, fl, m, lv, gh, servers, th, cx] = await Promise.all([read($, sys), read($, usage), read($, forks), read($, mode), read($, liveInfo), read($, git), read($, mcp), read($, theme), read($, ctxInfo)])
     pal = resolveTheme(th)
     const live = fl.filter(f => LIVE.includes(f.status))
-    const count = (st: string) => live.filter(f => f.status === st).length
-    const running = count('running'), waiting = count('waiting') + count('pending'), idle = count('idle')
     const now = Date.now()
     // w: the box's outer width in cells, so its title can be centered on the top border
     const box = (title: string, grow: number, body: RenderChildren, w = W) => {
@@ -801,33 +792,23 @@ export const register: Register = on => {
             <Text wrap="truncate-end" color={tc('#ff875f')} bold>{lv.model ? modelName(lv.model) : '—'}{gh.branch ? ` · ${gh.branch}` : ''}</Text>
             <Text color={tc(lv.isBusy ? '#5fd75f' : '#8a8a8a')}>{lv.isBusy ? '● busy' : '○ idle'}</Text>
           </Box>
-          <Text wrap="truncate-end">effort <Text color={tc('#ff875f')}>{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}  {lv.reqs} req</Text>
+          <Text wrap="truncate-end">effort <Text color={tc('#ff875f')}>{'▮'.repeat(EFFORTS.indexOf(lv.effort ?? '') + 1)}{'▯'.repeat(5 - EFFORTS.indexOf(lv.effort ?? '') - 1)}</Text> <Text bold>{lv.effort ?? '—'}</Text>{modes.length ? `  mode ${modes.join(',')}` : ''}</Text>
           <Text wrap="truncate-end">ctx <Text color={tc('#ff875f')}>{bar(u.ctx ?? 0, Math.max(4, Math.min(12, wide - 28)))}</Text> <Text bold>{u.ctx ?? 0}%</Text> {u.ctxTokens !== undefined && u.ctxWindow ? `${kTok(u.ctxTokens)}/${kTok(u.ctxWindow)}` : ''}{lv.compactions ? <Text color={tc('#ffd75f')}> ↺{lv.compactions}</Text> : ''}</Text>
-          <Text wrap="truncate-end"><Text bold>${(u.usd ?? 0).toFixed(2)}</Text>{(u.limits ?? []).map(r => {
-            const label = r.kind === 'five_hour' ? '5h' : r.kind === 'seven_day' ? '7d' : r.kind
-            return <Text>  {label} <Text color={tc('#ff875f')}>{bar(r.pct, 5)}</Text> {Math.round(r.pct)}% <Text dimColor>↻{until(r.resetsAt, now)}</Text></Text>
+          <Text wrap="truncate-end">cost <Text bold>${(u.usd ?? 0).toFixed(2)}</Text> <Text dimColor>· {lv.reqs} requests</Text></Text>
+          <Text wrap="truncate-end">limits{(u.limits ?? []).length ? '' : <Text dimColor> —</Text>}{(u.limits ?? []).map((r, i) => {
+            const label = r.kind === 'five_hour' ? '5h' : r.kind === 'seven_day' ? 'week' : r.kind
+            return <Text key={`lim-${i}`}>{i ? <Text dimColor> ·</Text> : ''} {label} <Text bold color={tc(loadColor(r.pct))}>{Math.round(r.pct)}%</Text> <Text dimColor>(resets {until(r.resetsAt, now)})</Text></Text>
           })}</Text>
-          <Text wrap="truncate-end">last req <Text dimColor>ttft</Text> {lv.ttftMs === undefined ? '—' : `${(lv.ttftMs / 1000).toFixed(1)}s`}   <Text color={tc('#5fd75f')}>R {running}</Text> <Text color={tc('#ffd75f')}>W {waiting}</Text> <Text color={tc('#ffd75f')}>I {idle}</Text> T {fl.length}</Text>
         </Box>, W - wThird)}
       </Box>
     )
 
-    const save = async () => {
-      const list = logBuf
-      const path = `${sessionCwd}/prodash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
-      try {
-        await $.fs.write(path, list.map(l => `[${hhmmss(l.at)}] [${l.level}] ${l.text}`).join('\n') + '\n')
-        $.ui.toast(`Log saved: ${path}`)
-      } catch (err) {
-        $.ui.toast(`Log not saved: ${String(err).slice(0, 120)}`)
-      }
-    }
     const go = (to: Mode) => () => update($, mode, cur => (cur === to ? 'main' : to))
-    // plain buttons draw as `1: Forks`, so all seven fit one row; the open view is the bright one
-    const ACTIONS: [string, Mode | 'log'][] = [['Forks', 'agents'], ['Perms', 'perms'], ['Board', 'board'], ['MCP', 'mcp'], ['Context', 'context'], ['Theme', 'theme'], ['Log', 'log']]
+    // plain buttons draw as `1: Forks`, so all six fit one row; the open view is the bright one
+    const ACTIONS: [string, Mode][] = [['Forks', 'agents'], ['Perms', 'perms'], ['Board', 'board'], ['MCP', 'mcp'], ['Context', 'context'], ['Theme', 'theme']]
     const actions = box('ACTION BAR', 0, <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap">
       {ACTIONS.map(([label, to], i) => (
-        <Button key={`a${i + 1}`} hotkey={String(i + 1)} label={label} plain dimColor={m !== to} onPress={to === 'log' ? save : go(to)} />
+        <Button key={`a${i + 1}`} hotkey={String(i + 1)} label={label} plain dimColor={m !== to} onPress={go(to)} />
       ))}
     </Box>)
 

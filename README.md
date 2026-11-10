@@ -42,8 +42,8 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | Section | Shows |
 | --- | --- |
 | **System Status** | `ONLINE` / `DEGRADED` (CPU ≥ 90%) / `SYNCING`, CPU bar, RAM used/total, CPU history |
-| **Agent Overview** | model · branch, busy/idle, effort level, permission mode, request count, context window bar with tokens used/window and compactions, session cost, 5h and 7d rate limits with time to reset, last request time to first token (TTFT), agents running / waiting / idle / total |
-| **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme · `7` Log; the open view is the bright one |
+| **Agent Overview** | model · branch, busy/idle, effort level, permission mode, context window bar with tokens used/window and compactions, session cost and request count, 5h and weekly rate limits with % used and time to reset |
+| **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme; the open view is the bright one |
 | **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
 | **Context** | % used, tokens used / window, a stacked bar, the 4 heaviest categories and the free space, with tokens and share |
 | **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
@@ -81,8 +81,6 @@ Press the key again, or **BACK**, to return to the main view.
 
 To type in the custom fields, open the pane with `/prodash` so it holds the keyboard.
 
-**`7` Log**: writes the session's event log (prompts, tool calls, agent events; last 500 lines) to `prodash-<timestamp>.log` in the session folder.
-
 ## How it gets its data
 
 The mod only uses the Claude Code plugin API: it reads tool calls, permission checks, model requests, turns and the session's usage as they happen. It sends nothing anywhere.
@@ -92,7 +90,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Agents and forks | `$.agent.list()`, polled every 250 ms while a fork runs, every 1 s otherwise |
 | Context, cost, rate limits | `$.session.usage()` every 1 s, written only when a figure changes |
 | Context breakdown, MCP schema tokens | `$.session.usage({ breakdown: 'summary' })` (local estimate, no API call) after each turn and every 30 s |
-| Model, effort, requests, TTFT | each model request (`turn.step`) |
+| Model, effort, requests | each model request (`turn.step`) |
 | Permission checks | `tool.check`; an ask's outcome when its call returns |
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |

@@ -53,6 +53,15 @@ test('resize: narrow and wide both draw every header', async ($, on) => {
   }
 })
 
+test('agent overview: labelled cost and limits lines, no ttft', async ($, on) => {
+  engine(on, {}, { startedAt: 0, context: { percent: 10 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: 1_700_000_000_000 + 3_600_000 }, { kind: 'seven_day', percentUsed: 4, resetsAt: 1_700_000_000_000 + 2 * 86_400_000 }] })
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+  for (const s of ['cost $', 'requests', 'limits']) expect(texts, s).toContain(s)
+  expect(texts).not.toContain('ttft')
+  await ui.unmount()
+})
+
 test('CPU 100% shows DEGRADED', async ($, on) => {
   engine(on)
   on('state.get', (_, e, next) =>
@@ -653,14 +662,15 @@ async function openTheme(ui: any, label: string) {
   expect(await ui.find({ type: 'Text', text: /THEME/ }), `${label}: THEME view`).toBeDefined()
 }
 
-test('action bar is a titled box with a1..a7 in order', async ($, on) => {
+test('action bar is a titled box with a1..a6 in order, no Log', async ($, on) => {
   engine(on)
   for (const surface of SURFACES) for (const cols of [80, 160]) {
     const ui = await $.ui.mount({ ...pane(cols), surface })
     expect(await ui.find({ type: 'Text', text: 'ACTION BAR' }), `${surface} ${cols}: title`).toBeDefined()
-    const keys = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+    const keys = ['a1', 'a2', 'a3', 'a4', 'a5', 'a6']
     const labels = await Promise.all(keys.map(async k => { const b = await ui.find({ type: 'Button', key: k }); return String(b?.props.label ?? b?.text) }))
-    expect(labels, `${surface} ${cols}: labels`).toEqual(['Forks', 'Perms', 'Board', 'MCP', 'Context', 'Theme', 'Log'])
+    expect(labels, `${surface} ${cols}: labels`).toEqual(['Forks', 'Perms', 'Board', 'MCP', 'Context', 'Theme'])
+    expect(await ui.find({ type: 'Button', key: 'a7' }), `${surface} ${cols}: no a7`).toBeUndefined()
     await ui.unmount()
   }
 })

@@ -23,7 +23,6 @@ export type Live = {
   model?: string
   effort?: string
   reqs: number
-  ttftMs?: number
   isBusy: boolean
   compactions: number
 }
