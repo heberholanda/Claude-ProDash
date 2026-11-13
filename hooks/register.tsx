@@ -128,7 +128,7 @@ export async function prFor(
     return id ? `#${id} ${state?.toUpperCase()} ${title.join(' ')}` : undefined
   }
   if (host === 'BITBUCKET') {
-    // shortcut: no official CLI, so the unauthenticated REST API covers public repos only; add a token when private ones are needed.
+    // shortcut: no official CLI; the anonymous REST API covers public repositories only.
     const q = encodeURIComponent(`source.branch.name="${branch}" AND state="OPEN"`)
     const res = JSON.parse((await fetchText(`https://api.bitbucket.org/2.0/repositories/${repo}/pullrequests?q=${q}&fields=values.id,values.state,values.title`)) || 'null')
     const p = res?.values?.[0]

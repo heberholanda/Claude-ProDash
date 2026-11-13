@@ -388,7 +388,7 @@ test('tool.check deny counts as d; queries are ignored', async ($, on) => {
   const box = gateSpy(on)
   // the session's 1 s timer writes what the hooks keep in memory
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.tool.call({ tool: 'WebFetch', url: 'https://x.io' })
+  await $.tool.call({ tool: 'WebSearch', query: 'x' } as never)
   await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
   await flushClock.advance(1000)
   expect(box.g?.total).toBe(1)
