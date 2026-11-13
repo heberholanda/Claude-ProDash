@@ -77,6 +77,8 @@ export type PaletteKey = 'border' | 'ok' | 'warn' | 'bad' | 'info' | 'accent' | 
 export type Palette = Record<PaletteKey, string>
 /** name: a preset or 'custom'; base: the preset custom starts from; custom: the roles the user overrode (#rrggbb) */
 export type ThemeState = { name: string; base: string; custom: Partial<Palette> }
+/** global: every repo's theme unless the repo has its own; force: global wins everywhere; scope: where edits go; root: this session's repo root (or cwd) */
+export type ThemeCfg = { global?: ThemeState; repo?: ThemeState; force: boolean; scope: 'repo' | 'global'; root: string }
 /** connected: has tools in the session; the rest come from WaitForMcpServers / ToolSearch results */
 export type McpStatus = 'connected' | 'pending' | 'failed' | 'needs-auth' | 'disabled'
 export type McpServer = {
@@ -122,6 +124,7 @@ declare module 'claude-code' {
       mcp: Shaped<McpServer[]>
       ctx: Shaped<Ctx>
       theme: Shaped<ThemeState>
+      themeCfg: Shaped<ThemeCfg>
       live: Shaped<Live>
     }
   }

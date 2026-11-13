@@ -34,12 +34,14 @@ function engine(on: On, tools: Record<string, unknown> = {}, usage: unknown = { 
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('session.usage', () => ({ value: usage as never }))
   on('agent.list', () => ({ value: [] }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } as never }))
+  // set proc.toplevel to answer `git rev-parse --show-toplevel`
+  const proc = { toplevel: '' }
+  on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: (e as any).argv?.join(' ') === 'git rev-parse --show-toplevel' ? proc.toplevel : '', stderr: '' } as never }))
   // $.store stand-in: tests seed or read `store` directly
   const store = new Map<string, unknown>()
   on('store.get', (_, e) => ({ value: store.get(e.key) }) as never)
   on('store.set', (_, e) => { store.set(e.key, e.value); return { value: undefined } as never })
-  return { clock, list, store }
+  return { clock, list, store, proc }
 }
 
 test('resize: narrow and wide both draw every header', async ($, on) => {
@@ -734,15 +736,22 @@ test('every 30s the list refreshes: stats kept, vanished servers dropped or kept
 })
 
 // ---- THEME ----
-import type { ThemeState } from '../types/index'
+import type { ThemeCfg, ThemeState } from '../types/index'
 
 // A versioned in-memory theme cell: seeded read, writes recorded (box.t = last write or seed).
-function seedTheme(on: On, t?: ThemeState) {
-  const box: { t?: ThemeState; writes: ThemeState[]; version: number } = { t, writes: [], version: t ? 1 : 0 }
+function seedTheme(on: On, t?: ThemeState, c?: ThemeCfg) {
+  const box: { t?: ThemeState; writes: ThemeState[]; version: number; c?: ThemeCfg; cv: number } = { t, writes: [], version: t ? 1 : 0, c, cv: 1 }
   const isTheme = (e: { plugin: string; key: string }) => e.plugin === 'prodash' && e.key === 'theme'
+  const isCfg = (e: { plugin: string; key: string }) => !!c && e.plugin === 'prodash' && e.key === 'themeCfg'
   on('state.get', (_, e, next) =>
-    isTheme(e) && box.t ? { value: { value: { shape: 'theme-1', value: box.t }, version: box.version } } as never : next(e))
+    isCfg(e) ? { value: { value: { shape: 'themecfg-1', value: box.c }, version: box.cv } } as never
+    : isTheme(e) && box.t ? { value: { value: { shape: 'theme-1', value: box.t }, version: box.version } } as never : next(e))
   on('state.set', (_, e, next) => {
+    if (isCfg(e)) {
+      if (e.ifVersion !== undefined && e.ifVersion !== box.cv) return { value: { isSet: false, version: box.cv } } as never
+      box.c = (e.value as { value: ThemeCfg }).value
+      return { value: { isSet: true, version: ++box.cv } } as never
+    }
     if (!isTheme(e)) return next(e)
     if (e.ifVersion !== undefined && e.ifVersion !== box.version) return { value: { isSet: false, version: box.version } } as never
     box.writes.push(box.t = (e.value as { value: ThemeState }).value)
@@ -863,4 +872,104 @@ test('session.start ignores a stored theme that is not a ThemeState', async ($, 
   store.set('prodash.theme', { name: 42, custom: 'x' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(box.writes.some(t => (t as any).name === 42)).toBe(false)
+})
+
+// ---- THEME PER REPO ----
+import { themeInForce } from '../hooks/register'
+
+const DRACULA: ThemeState = { name: 'dracula', base: 'dracula', custom: {} }
+const NORD: ThemeState = { name: 'nord', base: 'nord', custom: {} }
+
+// The mock state cells don't notify the pane, so re-mount to see a write on screen.
+async function remount($: any, ui: any) {
+  await ui.unmount()
+  const next = await $.ui.mount({ ...pane(120), surface: SURFACES[0]! })
+  // the mode is kept across mounts; open THEME only if it is not already on screen
+  if (!(await next.find({ type: 'Text', text: /THEME/ }))) await openTheme(next, 'remount')
+  return next
+}
+
+test('theme in force: forced global, else the repo own, else global, else default', () => {
+  const c: ThemeCfg = { force: false, scope: 'global', root: '/r' }
+  expect(themeInForce(c).name).toBe('default')
+  expect(themeInForce({ ...c, global: DRACULA })).toEqual(DRACULA)
+  expect(themeInForce({ ...c, global: DRACULA, repo: NORD })).toEqual(NORD)
+  expect(themeInForce({ ...c, global: DRACULA, repo: NORD, force: true })).toEqual(DRACULA)
+})
+
+test('session.start loads the repo theme by repo root; force makes global win', async ($, on) => {
+  const { store, proc } = engine(on)
+  proc.toplevel = '/repo'
+  const box = themeSpy(on)
+  store.set('prodash.theme', DRACULA)
+  store.set('prodash.theme.repo:/repo', NORD)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(box.t).toEqual(NORD)
+  store.set('prodash.theme.force', true)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(box.t).toEqual(DRACULA)
+})
+
+test('scope repo: a preset is saved for this repo only; global is untouched', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, DRACULA, { global: DRACULA, force: false, scope: 'global', root: '/repo' })
+  let ui = await $.ui.mount({ ...pane(120), surface: SURFACES[0]! })
+  await openTheme(ui, 'repo')
+  expect(await ui.find({ type: 'Text', text: /This repo \(repo\)/ })).toBeDefined()
+  await ui.press({ key: 'th-scope-repo' })
+  await ui.press({ key: 'th-matrix' })
+  expect(store.get('prodash.theme.repo:/repo')).toEqual({ name: 'matrix', base: 'matrix', custom: {} })
+  expect(store.has('prodash.theme')).toBe(false)
+  expect(box.c?.global).toEqual(DRACULA)
+  expect(box.t?.name).toBe('matrix')
+  ui = await remount($, ui)
+  expect(await ui.find({ type: 'Text', text: /in use: matrix \(repo\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('scope global with a repo theme edits global while the repo theme stays in force', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, NORD, { global: DRACULA, repo: NORD, force: false, scope: 'global', root: '/repo' })
+  let ui = await $.ui.mount({ ...pane(120), surface: SURFACES[0]! })
+  await openTheme(ui, 'global')
+  const drac = await ui.find({ type: 'Button', key: 'th-dracula' })
+  expect(drac?.text ?? '', 'global theme is the one marked').toContain('●')
+  await ui.press({ key: 'th-mono' })
+  expect(store.get('prodash.theme')).toEqual({ name: 'mono', base: 'mono', custom: {} })
+  expect(box.c?.repo).toEqual(NORD)
+  expect(box.t).toEqual(NORD)
+  await ui.unmount()
+})
+
+test('force global overrides the repo theme and is saved; turning it off brings the repo theme back', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, NORD, { global: DRACULA, repo: NORD, force: false, scope: 'repo', root: '/repo' })
+  let ui = await $.ui.mount({ ...pane(120), surface: SURFACES[0]! })
+  await openTheme(ui, 'force')
+  await ui.press({ key: 'th-force' })
+  expect(box.t).toEqual(DRACULA)
+  expect(store.get('prodash.theme.force')).toBe(true)
+  ui = await remount($, ui)
+  expect(await ui.find({ type: 'Text', text: /global, forced/ })).toBeDefined()
+  await ui.press({ key: 'th-amber' }) // forced: edits go to global
+  expect(store.get('prodash.theme')).toEqual({ name: 'amber', base: 'amber', custom: {} })
+  expect(store.has('prodash.theme.repo:/repo')).toBe(false)
+  await ui.press({ key: 'th-force' })
+  expect(box.t).toEqual(NORD)
+  expect(store.get('prodash.theme.force')).toBe(false)
+  await ui.unmount()
+})
+
+test('USE GLOBAL IN THIS REPO drops the repo theme', async ($, on) => {
+  const { store } = engine(on)
+  const box = seedTheme(on, NORD, { global: DRACULA, repo: NORD, force: false, scope: 'repo', root: '/repo' })
+  let ui = await $.ui.mount({ ...pane(120), surface: SURFACES[0]! })
+  await openTheme(ui, 'use-global')
+  await ui.press({ key: 'th-use-global' })
+  expect(box.t).toEqual(DRACULA)
+  expect(box.c?.repo).toBeUndefined()
+  expect(store.get('prodash.theme.repo:/repo')).toBeNull()
+  ui = await remount($, ui)
+  expect(await ui.find({ type: 'Button', key: 'th-use-global' })).toBeUndefined()
+  await ui.unmount()
 })

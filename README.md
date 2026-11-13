@@ -77,7 +77,11 @@ Press the key again, or **BACK**, to return to the main view.
 **`6` Theme**: the dashboard's colors.
 - **Presets** (soft palettes): `default`, `matrix`, `dracula`, `nord`, `amber`, `cyberpunk`, `mono`, and `vivid` (bright colors).
 - **Custom**: starts from the last preset and lets you set each role (border, ok, warn, bad, info, accent, dim, text) from a list of colors or by typing `#rrggbb` + Enter. Changed roles show `*`; **RESET CUSTOM** undoes them.
-- The theme is saved across sessions.
+- **Per repository**: each repository (by its root folder; outside a repo, the session folder) can have its own theme. A repo without one uses the global theme. The header shows the theme in use and where it comes from: `(repo)`, `(global)` or `(global, forced)`.
+- **Scope**: `This repo` saves preset and color changes for the current repository only; `Global` saves them to the global theme. The view opens on the scope of the theme in use.
+- **Force global theme**: every repository uses the global theme; repo themes are kept and come back when it is turned off.
+- **USE GLOBAL IN THIS REPO**: drops this repository's own theme.
+- Themes are saved across sessions.
 
 To type in the custom fields, open the pane with `/prodash` so it holds the keyboard.
 

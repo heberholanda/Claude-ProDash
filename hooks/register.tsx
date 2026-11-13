@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Bg, Cron, Ctx, Fork, McpServer, McpStatus, Palette, PaletteKey, ThemeState, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
+import type { Bg, Cron, Ctx, Fork, McpServer, McpStatus, Palette, PaletteKey, ThemeCfg, ThemeState, Plan, Request, Gate, GateEvent, GateKind, Git, GitFile, Level, Live, LogLine, Mode, Perm, Sys, Todo, Touched, Usage } from '../types'
 
 const PANE = 'prodash'
 const MAX_LOGS = 500 // fixed ring: a long session never grows the buffer
@@ -28,6 +28,7 @@ const bg = atom({ plugin: 'prodash', key: 'bg' } as const, [] as Bg[], { shape: 
 const mcp = atom({ plugin: 'prodash', key: 'mcp' } as const, [] as McpServer[], { shape: 'mcp-1' })
 const ctxInfo = atom({ plugin: 'prodash', key: 'ctx' } as const, { used: 0, max: 0, rows: [], mcp: {}, memory: [], skills: [], skillsTotal: 0, model: '' } as Ctx, { shape: 'ctx-2' })
 const theme = atom({ plugin: 'prodash', key: 'theme' } as const, { name: 'default', base: 'default', custom: {} } as ThemeState, { shape: 'theme-1' })
+const themeCfg = atom({ plugin: 'prodash', key: 'themeCfg' } as const, { force: false, scope: 'global', root: '' } as ThemeCfg, { shape: 'themecfg-1' })
 const crons = atom({ plugin: 'prodash', key: 'crons' } as const, [] as Cron[], { shape: 'crons-1' })
 
 const CYAN = '#5fd7d7'
@@ -334,9 +335,28 @@ async function ctxSample($: EngineInterface) {
   if (json !== lastCtx) { lastCtx = json; await update($, ctxInfo, () => v) }
 }
 
+const DEFAULT_THEME: ThemeState = { name: 'default', base: 'default', custom: {} }
+const repoThemeKey = (root: string) => `prodash.theme.repo:${root}`
+// Which theme draws the pane: forced global, else the repo's own, else global.
+export const themeInForce = (c: ThemeCfg): ThemeState => (c.force ? c.global : c.repo ?? c.global) ?? DEFAULT_THEME
+// Which theme the THEME view edits: global when forced or scoped global, else the repo's.
+const themeTarget = (c: ThemeCfg) => (c.force || c.scope === 'global' ? 'global' : 'repo') as 'global' | 'repo'
+
+async function setThemeCfg($: EngineInterface, fn: (c: ThemeCfg) => ThemeCfg) {
+  const c = await update($, themeCfg, fn)
+  await update($, theme, () => themeInForce(c))
+  return c
+}
 async function setTheme($: EngineInterface, fn: (t: ThemeState) => ThemeState) {
-  const next = await update($, theme, fn)
-  await $.store.set('prodash.theme', next).catch(() => undefined)
+  const cur = await read($, theme)
+  const c = await setThemeCfg($, c => {
+    const target = themeTarget(c)
+    // the theme on screen is the starting point when it is the one being edited (or the repo has none yet)
+    const from = (target === 'global') === (c.force || !c.repo) ? cur : c[target] ?? (target === 'global' ? DEFAULT_THEME : cur)
+    return { ...c, [target]: fn(from) }
+  })
+  const target = themeTarget(c)
+  await $.store.set(target === 'global' ? 'prodash.theme' : repoThemeKey(c.root), c[target]).catch(() => undefined)
 }
 
 async function board($: EngineInterface, tool: string, input: Record<string, unknown>, result: unknown) {
@@ -438,8 +458,11 @@ export const register: Register = on => {
     await $.command.register({ name: 'prodash', description: 'Open the Pro Dash pane' }).catch(() => undefined)
     await update($, usage, u => ({ ...u, startedAt: u.startedAt || Date.now() })).catch(() => undefined)
     sessionCwd = await $.session.cwd().catch(() => '')
-    const stored = await $.store.get('prodash.theme').catch(() => undefined)
-    if (isTheme(stored)) await update($, theme, () => stored).catch(() => undefined)
+    const root = (await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: sessionCwd, timeoutMs: 8000 })
+      .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''), () => '')) || sessionCwd
+    const [g, r, f] = await Promise.all(['prodash.theme', repoThemeKey(root), 'prodash.theme.force'].map(k => $.store.get(k).catch(() => undefined)))
+    const cfg: ThemeCfg = { global: isTheme(g) ? g : undefined, repo: isTheme(r) ? r : undefined, force: f === true, scope: isTheme(r) ? 'repo' : 'global', root }
+    await setThemeCfg($, () => cfg).catch(() => undefined)
     // seed module memory from what an earlier load stored
     await Promise.all([
       read($, logs).then(v => { if (!logBuf.length) logBuf.push(...v) }),
@@ -1066,11 +1089,18 @@ export const register: Register = on => {
         {back}
       </Box>)
     } else if (m === 'theme') {
+      const cfg = await read($, themeCfg)
+      const target = themeTarget(cfg)
+      const inForce = cfg.force ? 'global' : cfg.repo ? 'repo' : 'global'
+      // the theme being edited: what is on screen, or the stored one for the other scope
+      const et = target === inForce ? th : cfg[target] ?? (target === 'global' ? DEFAULT_THEME : th)
+      const repoName = cfg.root.split(/[\\/]/).filter(Boolean).pop() ?? 'repo'
+      const radio = (sel: boolean, label: string) => <Text><Text color={sel ? pal.ok : pal.dim}>{sel ? '●' : '○'}</Text> <Text bold={sel} dimColor={cfg.force}>{label}</Text></Text>
       const swatch = (p: Palette) => <Text>{(['border', 'ok', 'warn', 'bad', 'info', 'accent', 'purple', 'dim'] as PaletteKey[]).map(k => <Text color={p[k]}>■</Text>)}</Text>
       const presetRow = (name: string, p: Palette) => (
         <Button key={`th-${name}`} plain onPress={() => setTheme($, t => ({ ...t, name, base: name === 'custom' ? t.base : name }))}>
-          <Text color={th.name === name ? pal.ok : pal.dim}>{th.name === name ? '●' : '○'} </Text>
-          <Text bold={th.name === name}>{name.padEnd(11)}</Text>
+          <Text color={et.name === name ? pal.ok : pal.dim}>{et.name === name ? '●' : '○'} </Text>
+          <Text bold={et.name === name}>{name.padEnd(11)}</Text>
           {swatch(p)}
         </Button>
       )
@@ -1080,17 +1110,27 @@ export const register: Register = on => {
         return setTheme($, t => ({ ...t, name: 'custom', custom: { ...t.custom, [role]: `#${m[1]!.toLowerCase()}` } }))
       }
       body = box('THEME', 1, <Box flexDirection="column">
+        <Text>in use: <Text bold>{th.name}</Text> <Text dimColor>({cfg.force ? 'global, forced' : inForce})</Text></Text>
+        <Box flexDirection="row" gap={2}>
+          <Text bold color={pal.border}>SCOPE</Text>
+          <Button key="th-scope-repo" plain onPress={() => !cfg.force && setThemeCfg($, c => ({ ...c, scope: 'repo' }))}>{radio(target === 'repo', `This repo (${repoName})`)}</Button>
+          <Button key="th-scope-global" plain onPress={() => !cfg.force && setThemeCfg($, c => ({ ...c, scope: 'global' }))}>{radio(target === 'global', 'Global')}</Button>
+          <Button key="th-force" plain onPress={async () => {
+            const c = await setThemeCfg($, c => ({ ...c, force: !c.force }))
+            await $.store.set('prodash.theme.force', c.force).catch(() => undefined)
+          }}><Text><Text color={cfg.force ? pal.ok : pal.dim}>{cfg.force ? '[x]' : '[ ]'}</Text> Force global theme</Text></Button>
+        </Box>
         <Text bold color={pal.border}>PRESETS</Text>
         {Object.entries(THEMES).map(([name, p]) => presetRow(name, p))}
-        {presetRow('custom', resolveTheme({ ...th, name: 'custom' }))}
+        {presetRow('custom', resolveTheme({ ...et, name: 'custom' }))}
         <Box marginTop={1} justifyContent="space-between">
-          <Text bold color={pal.border}>CUSTOM <Text dimColor bold={false}>(starts from {th.base}; pick a color or type #rrggbb + Enter)</Text></Text>
+          <Text bold color={pal.border}>CUSTOM <Text dimColor bold={false}>(starts from {et.base}; pick a color or type #rrggbb + Enter)</Text></Text>
         </Box>
         {EDITABLE.map(role => {
-          const cur = resolveTheme({ ...th, name: 'custom' })[role]
+          const cur = resolveTheme({ ...et, name: 'custom' })[role]
           return (
             <Box key={`role-${role}`} flexDirection="row" gap={1}>
-              <Text>{role.padEnd(7)} <Text color={cur}>■■</Text> <Text dimColor>{cur}</Text>{th.custom[role] ? <Text color={pal.accent}> *</Text> : '  '}</Text>
+              <Text>{role.padEnd(7)} <Text color={cur}>■■</Text> <Text dimColor>{cur}</Text>{et.custom[role] ? <Text color={pal.accent}> *</Text> : '  '}</Text>
               <Select key={`sel-${role}`} options={SWATCHES.map(([label, value]) => ({ label: `${label} ${value}`, value }))} value={SWATCHES.find(x => x[1] === cur)?.[1]} onSelect={v => setRole(role, v)} />
               <Input key={`in-${role}`} placeholder="#rrggbb" onSubmit={v => setRole(role, v)} />
             </Box>
@@ -1098,6 +1138,10 @@ export const register: Register = on => {
         })}
         <Box gap={2}>
           <Button key="th-reset" label="RESET CUSTOM" onPress={() => setTheme($, t => ({ ...t, custom: {} }))} />
+          {cfg.repo && <Button key="th-use-global" label="USE GLOBAL IN THIS REPO" onPress={async () => {
+            const c = await setThemeCfg($, c => ({ ...c, repo: undefined, scope: 'global' }))
+            await $.store.set(repoThemeKey(c.root), null).catch(() => undefined)
+          }} />}
           {back}
         </Box>
       </Box>)
