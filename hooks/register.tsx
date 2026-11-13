@@ -684,21 +684,18 @@ export const register: Register = on => {
     return step.value
   })
 
-  // Observer only: it returns the verdict passCheck(check) gave, untouched, so the decision is always the one the
-  // user's rules, settings or the person made. Parameter names are unique in the file; the 1 s timer writes the gate.
-  on('tool.check', async (_checkEngine, check, passCheck) => {
-    const verdict = await passCheck(check)
-    if (!check.tool_use_id) return verdict // a plugin's query, not a call
-    const tool = String(check.tool)
+  // The Perms view's record of one call's permission check. The mod has no hook on tool.check: the tool.call hook
+  // asks $.tool.check for the session's verdict (a query: nothing runs, no dialog, no classifier) and records it here.
+  type Verdict = { decision: string; reason?: string; rule?: string; setting?: unknown; hook?: unknown; plugin?: unknown }
+  const recordCheck = (verdict: Verdict, id: string, tool: string, input: Record<string, unknown>, agentId: string | undefined, isReadOnly: boolean, at: number) => {
     const kind: GateKind = verdict.decision === 'allow' ? 'a' : verdict.decision === 'deny' ? 'd' : 'p'
     const via = verdict.decision === 'ask'
       ? (!verdict.plugin && modes.includes('auto') ? 'classifier' : 'person')
       : verdict.rule ? 'rule' : verdict.setting ? 'setting' : verdict.hook ? 'hook' : 'mode'
-    if (kind === 'p') pending.set(check.tool_use_id, Date.now())
+    if (kind === 'p') pending.set(id, at)
     const ev: GateEvent = {
-      id: check.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
-      detail: detail((check.input ?? {}) as Record<string, unknown>),
-      reason: verdict.reason?.slice(0, 200), rule: verdict.rule, agent: check.agentId, isReadOnly: check.isReadOnly === true,
+      id, at, tool, cat: toolCat(tool), kind, via, detail: detail(input),
+      reason: verdict.reason?.slice(0, 200), rule: verdict.rule, agent: agentId, isReadOnly,
     }
     const g = gateMem
     const rules = verdict.rule
@@ -710,15 +707,14 @@ export const register: Register = on => {
       total: g.total + 1,
       counts: { ...g.counts, [kind]: g.counts[kind] + 1 },
       cats: { ...g.cats, [ev.cat]: g.cats[ev.cat] + 1 },
-      reads: g.reads + (ev.isReadOnly ? 1 : 0),
-      writes: g.writes + (ev.isReadOnly ? 0 : 1),
-      main: g.main + (check.agentId ? 0 : 1),
-      forks: g.forks + (check.agentId ? 1 : 0),
+      reads: g.reads + (isReadOnly ? 1 : 0),
+      writes: g.writes + (isReadOnly ? 0 : 1),
+      main: g.main + (agentId ? 0 : 1),
+      forks: g.forks + (agentId ? 1 : 0),
       rules,
     }
     dirty.add('gate')
-    return verdict
-  }) // no .catch: a hook that fails is skipped and the check goes on as the user's rules decide
+  }
 
   on('classic.Stop', async ($, e, next) => {
     const tasks = (e.background_tasks ?? []).filter(t => t.type !== 'subagent')
@@ -771,7 +767,10 @@ export const register: Register = on => {
     }
 
     const t0 = Date.now()
+    // the verdict the call will get, asked before it is checked (tool.call runs ahead of the permission check)
+    const verdict = e.tool_use_id ? await $.tool.check({ tool, input: raw } as never).catch(() => undefined) : undefined
     const r = await next(e)
+    if (verdict) recordCheck(verdict as Verdict, e.tool_use_id, tool, raw, e.agentId, (r as { isReadOnly?: boolean }).isReadOnly === true, t0)
     const denied = 'deny' in r && r.deny !== undefined
     const srv = mcpServer(tool)
     if (srv) {

@@ -124,7 +124,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Context, cost, rate limits | `$.session.usage()` every 1 s, written only when a figure changes |
 | Context breakdown, MCP schema tokens | `$.session.usage({ breakdown: 'summary' })` (local estimate, no API call) after each turn and every 30 s |
 | Model, effort, requests | each model request (`turn.step`) |
-| Permission checks | `tool.check`; an ask's outcome when its call returns |
+| Permission checks | `$.tool.check` (a query: nothing runs, no dialog opens, no classifier is asked) from the `tool.call` hook, just before each call is checked; an ask's outcome when its call returns |
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |
 | CPU / GPU / RAM | one PowerShell CIM query every 15 s |
@@ -154,7 +154,7 @@ The Bitbucket URL is the only one the mod builds: its host is always `api.bitbuc
 Nothing else is sent anywhere. The session's folder (`session.cwd`) is only used to run `git` there, and the conversation (`session.messages`, read once to fill the request timeline) never leaves the pane.
 
 **Hooks.** Every hook only watches and passes its event on unchanged; none decides, rewrites or blocks anything:
-- `tool.check` (a permission check): records the decision your rules, settings or you already made, for the `2` Perms view, and returns that same decision. It never answers a check. It is the mod's only hook on a permission check.
+- The mod has no hook on `tool.check`, so it can never answer a permission check. For the `2` Perms view, its `tool.call` hook asks `$.tool.check` for the session's verdict (a read-only query) and records it with the call's outcome.
 - The mod has no hook on `agent.spawn`: subagents are read from `$.agent.list()`, and their description, permission mode and tools are never touched.
 - `classic.Stop`: reads the background shells and scheduled jobs, for the Board.
 - `turn.step`, `tool.call`, `session.compact`, `turn.start`, `turn.complete`, `prompt.submit`: count requests, tool calls, compactions and your prompts (the prompt text stays in the pane).
@@ -168,6 +168,7 @@ Nothing else is sent anywhere. The session's folder (`session.cwd`) is only used
 - Counters start when the mod loads. Earlier permission checks and tool calls are not shown; earlier requests appear in the timeline without a time.
 - A subagent leaves Active Forks once it ends.
 - A fork's activity is built from its tool calls and tasks; the short summary Claude Code's own subagent panel shows is not in the plugin API.
+- The verdict comes from `$.tool.check`, which asks no `PreToolUse` settings hook: a call such a hook decides shows the verdict your rules and mode give.
 - There is no API event for "the person refused this ask": a call that waited on an ask and ends with an error worded as a refusal is counted as denied.
 - The classifier is only told apart from your own approvals while the session shows auto mode.
 - Background shells and schedules are rebuilt from tool calls and refreshed each time Claude stops; there is no live list.
