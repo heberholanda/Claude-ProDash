@@ -1,5 +1,13 @@
 {
   "name": "claude-prodash",
-  "owner": { "name": "heberholanda" },
-  "plugins": [{ "name": "prodash", "source": "./" }]
+  "owner": {
+    "name": "heberholanda"
+  },
+  "description": "Pro Dash: a live dashboard pane for Claude Code",
+  "plugins": [
+    {
+      "name": "prodash",
+      "source": "./"
+    }
+  ]
 }

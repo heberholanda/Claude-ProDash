@@ -162,48 +162,55 @@ const fakeRun = (out: Record<string, string>) => {
   }
   return { run, calls }
 }
+// Fake http call: answers every URL with `body` (undefined = request failed) and records the URLs.
+const fakeFetch = (body?: string) => {
+  const urls: string[] = []
+  return { fetchText: async (url: string) => (urls.push(url), body), urls }
+}
+const noFetch = fakeFetch().fetchText
 
 test('GitHub PR comes from gh pr view', async () => {
   const { run, calls } = fakeRun({ 'gh pr view': '#1 MERGED interactive pr list' })
-  expect(await prFor(run, { host: 'GITHUB', repo: 'cli/cli' })).toBe('#1 MERGED interactive pr list')
+  expect(await prFor(run, noFetch, { host: 'GITHUB', repo: 'cli/cli' })).toBe('#1 MERGED interactive pr list')
   expect(calls[0]).toEqual(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
 })
 
 test('GitLab MR comes from glab mr view JSON', async () => {
   const { run, calls } = fakeRun({ 'glab mr view': JSON.stringify({ iid: 42, state: 'opened', title: 'Fix login', id: 9001 }) })
-  expect(await prFor(run, { host: 'GITLAB', repo: 'grp/proj' })).toBe('!42 OPENED Fix login')
+  expect(await prFor(run, noFetch, { host: 'GITLAB', repo: 'grp/proj' })).toBe('!42 OPENED Fix login')
   expect(calls[0]).toEqual(['glab', 'mr', 'view', '-F', 'json'])
 })
 
-test('Azure DevOps PR comes from az repos pr list for the current branch', async () => {
+test('Azure DevOps PR comes from az repos pr list for the current branch, run by name with no shell', async () => {
   const { run, calls } = fakeRun({ 'git branch': 'feature/x', 'az repos': '7\tactive\tAdd\tlogin' })
-  expect(await prFor(run, { host: 'AZURE DEVOPS', repo: 'org/proj/repo' })).toBe('#7 ACTIVE Add login')
+  expect(await prFor(run, noFetch, { host: 'AZURE DEVOPS', repo: 'org/proj/repo' })).toBe('#7 ACTIVE Add login')
   expect(calls[1]).toEqual(['az', 'repos', 'pr', 'list', '--source-branch', 'feature/x', '--status', 'active', '--query', '[0].[pullRequestId,status,title]', '-o', 'tsv'])
+  const missing = fakeRun({ 'git branch': 'main' })
+  expect(await prFor(missing.run, noFetch, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBeUndefined()
+  expect(missing.calls.map(c => c[0])).toEqual(['git', 'az'])
+  expect(await prFor(fakeRun({ 'git branch': 'main', 'az repos': '' }).run, noFetch, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBeUndefined()
 })
 
-test('Azure DevOps falls back to cmd /c az (az.cmd on Windows); empty output means no PR', async () => {
-  const { run, calls } = fakeRun({ 'git branch': 'main', 'cmd /c az': '3\tactive\tFix' })
-  expect(await prFor(run, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBe('#3 ACTIVE Fix')
-  expect(calls.map(c => c[0])).toEqual(['git', 'az', 'cmd'])
-  expect(await prFor(fakeRun({ 'git branch': 'main', 'az repos': '' }).run, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBeUndefined()
-})
-
-test('Bitbucket PR comes from the public REST API, filtered by branch and OPEN', async () => {
-  const body = '{"values": [{"id": 582, "title": "Update express", "state": "OPEN"}]}'
-  const { run, calls } = fakeRun({ 'git branch': 'renovate/express-4.x', curl: body })
-  expect(await prFor(run, { host: 'BITBUCKET', repo: 'ws/repo' })).toBe('#582 OPEN Update express')
-  const url = new URL(calls[1]![2]!)
+test('Bitbucket PR comes from the public REST API through the http call, filtered by branch and OPEN', async () => {
+  const { run, calls } = fakeRun({ 'git branch': 'renovate/express-4.x' })
+  const { fetchText, urls } = fakeFetch('{"values": [{"id": 582, "title": "Update express", "state": "OPEN"}]}')
+  expect(await prFor(run, fetchText, { host: 'BITBUCKET', repo: 'ws/repo' })).toBe('#582 OPEN Update express')
+  expect(calls.map(c => c[0])).toEqual(['git'])
+  const url = new URL(urls[0]!)
+  expect(url.host).toBe('api.bitbucket.org')
   expect(url.pathname).toBe('/2.0/repositories/ws/repo/pullrequests')
   expect(url.searchParams.get('q')).toBe('source.branch.name="renovate/express-4.x" AND state="OPEN"')
   expect(url.searchParams.get('fields')).toBe('values.id,values.state,values.title')
-  expect(await prFor(fakeRun({ 'git branch': 'main', curl: '{"values": []}' }).run, { host: 'BITBUCKET', repo: 'ws/repo' })).toBeUndefined()
+  expect(await prFor(run, fakeFetch('{"values": []}').fetchText, { host: 'BITBUCKET', repo: 'ws/repo' })).toBeUndefined()
 })
 
-test('no PR line when the CLI is missing, the branch is detached, or the host is unknown', async () => {
-  for (const host of ['GITHUB', 'GITLAB', 'AZURE DEVOPS', 'BITBUCKET']) expect(await prFor(fakeRun({ 'git branch': 'main' }).run, { host, repo: 'a/b' })).toBeFalsy()
-  expect(await prFor(fakeRun({ 'git branch': '', curl: '{}' }).run, { host: 'BITBUCKET', repo: 'a/b' })).toBeUndefined()
+test('no PR line when the CLI or the request fails, the branch is detached, or the host is unknown', async () => {
+  for (const host of ['GITHUB', 'GITLAB', 'AZURE DEVOPS', 'BITBUCKET']) expect(await prFor(fakeRun({ 'git branch': 'main' }).run, noFetch, { host, repo: 'a/b' })).toBeFalsy()
+  const detached = fakeFetch('{}')
+  expect(await prFor(fakeRun({ 'git branch': '' }).run, detached.fetchText, { host: 'BITBUCKET', repo: 'a/b' })).toBeUndefined()
+  expect(detached.urls).toEqual([])
   const { run, calls } = fakeRun({ 'git branch': 'main' })
-  expect(await prFor(run, { host: 'CODEBERG.ORG', repo: 'me/repo' })).toBeUndefined()
+  expect(await prFor(run, noFetch, { host: 'CODEBERG.ORG', repo: 'me/repo' })).toBeUndefined()
   expect(calls.every(c => c[0] === 'git')).toBe(true)
 })
 

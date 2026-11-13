@@ -102,13 +102,18 @@ export function parseStatus(out: string): Git {
 export function parseRemote(url: string): { host: string; repo: string } {
   const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/i.exec(url.trim())
   if (!m) return { host: 'GIT', repo: url.trim() }
-  const h = m[1]!
-  const host = /github/i.test(h) ? 'GITHUB' : /gitlab/i.test(h) ? 'GITLAB' : /bitbucket/i.test(h) ? 'BITBUCKET'
-    : /dev\.azure\.com|visualstudio\.com/i.test(h) ? 'AZURE DEVOPS' : h.toUpperCase()
+  const hostName = m[1]!
+  const host = /github/i.test(hostName) ? 'GITHUB' : /gitlab/i.test(hostName) ? 'GITLAB' : /bitbucket/i.test(hostName) ? 'BITBUCKET'
+    : /dev\.azure\.com|visualstudio\.com/i.test(hostName) ? 'AZURE DEVOPS' : hostName.toUpperCase()
   return { host, repo: m[2]!.replace(/^v3\//, '').replace('/_git/', '/') }
 }
-// Open PR/MR for the current branch through the provider's own CLI; silently none when it's missing or signed out.
-export async function prFor(run: (argv: string[]) => Promise<string | undefined>, { host, repo }: { host: string; repo: string }): Promise<string | undefined> {
+// Open PR/MR for the current branch through the provider's own CLI (Bitbucket: its public REST API over the host's
+// http call); silently none when the CLI is missing or signed out.
+export async function prFor(
+  run: (argv: string[]) => Promise<string | undefined>,
+  fetchText: (url: string) => Promise<string | undefined>,
+  { host, repo }: { host: string; repo: string },
+): Promise<string | undefined> {
   if (host === 'GITHUB') return run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
   if (host === 'GITLAB') {
     const mr = JSON.parse((await run(['glab', 'mr', 'view', '-F', 'json'])) || 'null')
@@ -118,15 +123,14 @@ export async function prFor(run: (argv: string[]) => Promise<string | undefined>
   if (!branch) return undefined
   if (host === 'AZURE DEVOPS') {
     const args = ['repos', 'pr', 'list', '--source-branch', branch, '--status', 'active', '--query', '[0].[pullRequestId,status,title]', '-o', 'tsv']
-    // az is az.cmd on Windows, which can't be spawned without a shell.
-    const out = (await run(['az', ...args])) ?? (await run(['cmd', '/c', 'az', ...args]))
-    const [id, state, ...title] = (out ?? '').split('\t')
+    // shortcut: run by name with no shell; where az is only a .cmd script (Windows) it may not start, and the PR line stays hidden.
+    const [id, state, ...title] = ((await run(['az', ...args])) ?? '').split('\t')
     return id ? `#${id} ${state?.toUpperCase()} ${title.join(' ')}` : undefined
   }
   if (host === 'BITBUCKET') {
     // shortcut: no official CLI, so the unauthenticated REST API covers public repos only; add a token when private ones are needed.
     const q = encodeURIComponent(`source.branch.name="${branch}" AND state="OPEN"`)
-    const res = JSON.parse((await run(['curl', '-sf', `https://api.bitbucket.org/2.0/repositories/${repo}/pullrequests?q=${q}&fields=values.id,values.state,values.title`])) || 'null')
+    const res = JSON.parse((await fetchText(`https://api.bitbucket.org/2.0/repositories/${repo}/pullrequests?q=${q}&fields=values.id,values.state,values.title`)) || 'null')
     const p = res?.values?.[0]
     return p && `#${p.id} ${p.state} ${p.title}`
   }
@@ -225,8 +229,8 @@ function mcpMark(list: McpServer[], marks: [string, McpStatus, string?][]): McpS
 }
 
 // What a tool call is about, in a few words for the console.
-const detail = (e: Record<string, unknown>) => {
-  const v = e.command ?? e.file_path ?? e.pattern ?? e.path ?? e.url ?? e.description ?? e.query ?? ''
+const detail = (input: Record<string, unknown>) => {
+  const v = input.command ?? input.file_path ?? input.pattern ?? input.path ?? input.url ?? input.description ?? input.query ?? ''
   return String(v).replace(/\s+/g, ' ').slice(0, 80)
 }
 
@@ -259,7 +263,7 @@ let reqsDelta = 0 // model requests not yet written
 let livePatch: Partial<Live> = {}
 let flushQueued = false
 
-function log(_$: EngineInterface, level: Level, text: string, isSub = false) {
+function log(level: Level, text: string, isSub = false) {
   logBuf.push({ at: Date.now(), level, text: text.slice(0, 300), isSub })
   if (logBuf.length > MAX_LOGS) logBuf.splice(0, logBuf.length - MAX_LOGS)
 }
@@ -383,12 +387,12 @@ async function board($: EngineInterface, tool: string, input: Record<string, unk
     const t = res.task as { id?: string; subject?: string } | undefined
     // cap: drop the oldest completed tasks past 100
     if (t?.id) await update($, todos, list => {
-      const next = [...list.filter(x => x.id !== t.id), { id: t.id!, content: t.subject ?? '', status: 'pending' }]
-      while (next.length > 100) {
-        const k = next.findIndex(x => x.status === 'completed')
-        next.splice(k >= 0 ? k : 0, 1)
+      const kept = [...list.filter(x => x.id !== t.id), { id: t.id!, content: t.subject ?? '', status: 'pending' }]
+      while (kept.length > 100) {
+        const k = kept.findIndex(x => x.status === 'completed')
+        kept.splice(k >= 0 ? k : 0, 1)
       }
-      return next
+      return kept
     })
   } else if (tool === 'TaskUpdate' && typeof input.taskId === 'string') {
     const id = input.taskId, st = input.status as string | undefined, sub = input.subject as string | undefined
@@ -486,8 +490,8 @@ export const register: Register = on => {
         names.set(a.id, a.description || a.name || a.type)
         const was = forkStatus.get(a.id)
         if (was && was !== a.status && (a.status === 'failed' || a.status === 'killed'))
-          log($, a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
-        if (was && was !== a.status && a.status === 'completed') log($, 'SUCCESS', `${names.get(a.id)}: completed`, true)
+          log(a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
+        if (was && was !== a.status && a.status === 'completed') log('SUCCESS', `${names.get(a.id)}: completed`, true)
       }
       forkStatus.clear()
       for (const a of list) forkStatus.set(a.id, a.status)
@@ -528,19 +532,20 @@ export const register: Register = on => {
         $.ui.status(text)
       }
     }
-    $.clock.every(1000, () => quiet(pollUsage()))
+    $.clock.every(1000, () => {
+      quiet(pollUsage())
+      if (dirty.size && !flushQueued) quiet(flushNow($)) // e.g. the gate state tool.check leaves in memory
+    })
 
     // System load: Windows via CIM. shortcut: Windows only, add /proc or vm_stat for other OSes.
     let sysBusy = false
     const sample = async () => {
       if (sysBusy) return
       sysBusy = true
+      // Read-only CIM query, fixed text: CPU load, total/free RAM, and GPU as Task Manager shows it (each engine
+      // type's utilization summed, the busiest type wins; -1 when there are no counters). Prints "cpu total free gpu".
       const r = await $.process.run(
-        ['powershell', '-NoProfile', '-Command',
-          // GPU as Task Manager shows it: each engine type's utilization summed, the busiest type wins; -1 when no counters
-          '$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;' +
-          "$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match 'engtype_'}|Group-Object {$_.Name -replace '.*engtype_',''}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};" +
-          '"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"'],
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', `$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match 'engtype_'}|Group-Object {$_.Name -replace '.*engtype_',''}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"`],
         { timeoutMs: 8000 },
       ).catch(() => undefined).finally(() => { sysBusy = false })
       const [c, total, free, gp] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
@@ -595,7 +600,8 @@ export const register: Register = on => {
       const r = remote ? parseRemote(remote) : undefined
       repo = r?.repo
       host = r?.host
-      pr = (r && await prFor(run, r).catch(() => undefined)) || undefined
+      const fetchText = (url: string) => $.http.fetch(url).then(x => (x.ok ? x.text : undefined), () => undefined)
+      pr = (r && await prFor(run, fetchText, r).catch(() => undefined)) || undefined
       lastOid = '' // let the next status re-read the last commit (it may say "(5 minutes ago)")
     }
     if ((await read($, requests).catch(() => [1])).length === 0) {
@@ -663,19 +669,21 @@ export const register: Register = on => {
     return step.value
   })
 
-  on('tool.check', async ($, e, next) => {
-    const r = await next(e)
-    if (!e.tool_use_id) return r // a plugin's query, not a call
-    const tool = String(e.tool)
+  // Observer only: the verdict is whatever passCheck(check) settles to, returned as is. Parameter names are unique in
+  // the file so the directory can read that the event goes on unchanged; the gate state is flushed by the 1 s timer.
+  on('tool.check', async (_checkEngine, check, passCheck) => {
+    const r = await passCheck(check)
+    if (!check.tool_use_id) return r // a plugin's query, not a call
+    const tool = String(check.tool)
     const kind: GateKind = r.decision === 'allow' ? 'a' : r.decision === 'deny' ? 'd' : 'p'
     const via = r.decision === 'ask'
       ? (!r.plugin && modes.includes('auto') ? 'classifier' : 'person')
       : r.rule ? 'rule' : r.setting ? 'setting' : r.hook ? 'hook' : 'mode'
-    if (kind === 'p') pending.set(e.tool_use_id, Date.now())
+    if (kind === 'p') pending.set(check.tool_use_id, Date.now())
     const ev: GateEvent = {
-      id: e.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
-      detail: detail((e.input ?? {}) as Record<string, unknown>),
-      reason: r.reason?.slice(0, 200), rule: r.rule, agent: e.agentId, isReadOnly: e.isReadOnly === true,
+      id: check.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
+      detail: detail((check.input ?? {}) as Record<string, unknown>),
+      reason: r.reason?.slice(0, 200), rule: r.rule, agent: check.agentId, isReadOnly: check.isReadOnly === true,
     }
     const g = gateMem
     const rules = r.rule
@@ -689,13 +697,13 @@ export const register: Register = on => {
       cats: { ...g.cats, [ev.cat]: g.cats[ev.cat] + 1 },
       reads: g.reads + (ev.isReadOnly ? 1 : 0),
       writes: g.writes + (ev.isReadOnly ? 0 : 1),
-      main: g.main + (e.agentId ? 0 : 1),
-      forks: g.forks + (e.agentId ? 1 : 0),
+      main: g.main + (check.agentId ? 0 : 1),
+      forks: g.forks + (check.agentId ? 1 : 0),
       rules,
     }
-    markDirty($, 'gate')
+    dirty.add('gate')
     return r
-  }).catch(($, e, next) => next(e)) // observer: fail open
+  }) // no .catch: a hook that fails is skipped and the check goes on as the user's rules decide
 
   on('classic.Stop', async ($, e, next) => {
     const tasks = (e.background_tasks ?? []).filter(t => t.type !== 'subagent')
@@ -724,19 +732,20 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (e.text.trim()) log($, 'USER', `you: ${e.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+    if (e.text.trim()) log('USER', `you: ${e.text.replace(/\s+/g, ' ').slice(0, 120)}`)
     if (e.text.trim() && !e.command)
       quiet(update($, requests, list => [...list, { at: Date.now(), text: e.text.replace(/\s+/g, ' ').slice(0, 200), tools: 0, isDone: false }].slice(-50)))
     return next(e)
   }).catch(($, e, next) => next(e)) // observer: fail open
 
-  on('agent.spawn', async ($, e, next) => {
-    const r = await next(e)
-    log($, 'INFO', `${String((e as { description?: string }).description ?? 'agent')}: spawned → fork`)
-    const id = (r as { agentId?: string }).agentId
+  // Observer only: the spawn goes on as passSpawn(spawn) settles; nothing about the agent is changed.
+  on('agent.spawn', async (_spawnEngine, spawn, passSpawn) => {
+    const spawned = await passSpawn(spawn)
+    log('INFO', `${String((spawn as { description?: string }).description ?? 'agent')}: spawned → fork`)
+    const id = (spawned as { agentId?: string }).agentId
     if (id && !forkStatus.has(id)) forkStatus.set(id, 'pending')
-    return r
-  }).catch(($, e, next) => next(e)) // observer: fail open
+    return spawned
+  }) // no .catch: a hook that fails is skipped and the spawn goes on unchanged
 
   on('tool.call', async ($, e, next) => {
     const raw = e as unknown as Record<string, unknown>
@@ -779,7 +788,7 @@ export const register: Register = on => {
       }
     }
     const isError = !denied && (r as { isError?: boolean }).isError === true
-    log($, denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
+    log(denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
       `${who}: ${tool} → ${denied ? `denied (${r.deny})` : detail(raw)}`, !!e.agentId)
     countTool(tool, denied)
     markDirty($, 'perms')

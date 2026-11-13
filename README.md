@@ -57,7 +57,7 @@ claude plugin uninstall prodash@claude-prodash
 | --- | --- |
 | CPU / GPU / RAM in System Status | Windows (PowerShell + CIM). Other systems, or no GPU counters, show `n/a`. |
 | Git section, per-repository themes | `git` on the PATH and a git repository as the session folder (outside a repo, themes are kept per folder) |
-| Open PR / MR in Git section | the provider's CLI installed and signed in: [`gh`](https://cli.github.com/) for GitHub, [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab, [`az`](https://learn.microsoft.com/cli/azure/) with the `azure-devops` extension for Azure DevOps; Bitbucket uses `curl` and the public API (public repositories only). Other hosts show no PR line. |
+| Open PR / MR in Git section | the provider's CLI installed and signed in: [`gh`](https://cli.github.com/) for GitHub, [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab, [`az`](https://learn.microsoft.com/cli/azure/) with the `azure-devops` extension for Azure DevOps; Bitbucket uses its public REST API through Claude Code's own HTTP call (public repositories only). Other hosts show no PR line. |
 | 5h / 7d rate limits | a Claude subscription (the API has no such windows) |
 
 ## Use
@@ -116,7 +116,7 @@ To type in the custom fields, open the pane with `/prodash` so it holds the keyb
 
 ## How it gets its data
 
-The mod only uses the Claude Code plugin API: it reads tool calls, permission checks, model requests, turns and the session's usage as they happen. The only network traffic is the open PR / MR lookup, which goes to your git provider: through its own CLI (`gh`, `glab`, `az`, with your sign-in), or for Bitbucket an unauthenticated request to `api.bitbucket.org` that carries the repository and branch name. Nothing else leaves your machine.
+The mod only uses the Claude Code plugin API: it reads tool calls, permission checks, model requests, turns and the session's usage as they happen. What it runs, sends and hooks is listed in [What the mod runs, sends and hooks](#what-the-mod-runs-sends-and-hooks).
 
 | Data | Source |
 | --- | --- |
@@ -131,6 +131,36 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and the open PR/MR every 60 s |
 | Themes | the plugin store: `prodash.theme` (global), `prodash.theme.repo:<repo root>` (one per repository), `prodash.theme.force`; the repo root comes from `git rev-parse --show-toplevel` when the session starts |
 
+### What the mod runs, sends and hooks
+
+**Programs it runs.** Each one by name, with no shell, from the session's folder:
+
+| Program | Arguments | Why |
+| --- | --- | --- |
+| `git` | `status --porcelain=v2 --branch --show-stash`, `log -1`, `remote get-url origin`, `branch --show-current`, `rev-parse --show-toplevel` | the Git section, and the repository root that per-repository themes are keyed by |
+| `gh` | `pr view --json number,state,title` | the open pull request on GitHub |
+| `glab` | `mr view -F json` | the open merge request on GitLab |
+| `az` | `repos pr list --source-branch <branch> --status active` | the open pull request on Azure DevOps |
+| `powershell` | `-NoProfile -NonInteractive -Command` with one fixed, read-only CIM query (`Win32_Processor`, `Win32_OperatingSystem`, the GPU engine counters), written out in full in `hooks/register.tsx` | CPU, RAM and GPU in System Status (Windows) |
+
+`gh`, `glab` and `az` run only when the `origin` remote is on that provider, and use the sign-in you already gave them, to talk to that provider's own servers. The mod reads no token, key or password itself.
+
+**What leaves your machine.** Only the open PR / MR lookup:
+- `gh`, `glab` or `az` ask your git provider for the PR / MR of the current branch.
+- For Bitbucket, Claude Code's own HTTP call (`$.http.fetch`) sends an unauthenticated `GET` to `https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/pullrequests`, which carries the repository name and the branch name.
+
+Nothing else is sent anywhere. The session's folder (`session.cwd`) is only used to run `git` there, and the conversation (`session.messages`, read once to fill the request timeline) never leaves the pane.
+
+**Hooks.** Every hook only watches and passes its event on unchanged; none decides, rewrites or blocks anything:
+- `tool.check` (a permission check): records the decision your rules, settings or you already made, for the `2` Perms view. It never answers a check.
+- `agent.spawn`: notes that a subagent started, for Active Forks. The agent's description, permission mode and tools are left as they are.
+- `classic.Stop`: reads the background shells and scheduled jobs, for the Board.
+- `turn.step`, `tool.call`, `session.compact`, `turn.start`, `turn.complete`, `prompt.submit`: count requests, tool calls, compactions and your prompts (the prompt text stays in the pane).
+- `session.start` starts the timers and loads the saved theme; `session.measure` refreshes the context breakdown.
+- `ui.render` draws only the mod's own pane; on the session-mode indicator it only reads which modes are on (to tell auto mode's classifier apart) and passes it on unchanged.
+- `command.run` answers only its own `/prodash` command, registered with `$.command.register`.
+- Clicking a row in Active Forks calls `$.ui.view`, Claude Code's own call to show that agent's transcript; it comes from no other plugin.
+
 ### Limitations
 
 - Counters start when the mod loads. Earlier permission checks and tool calls are not shown; earlier requests appear in the timeline without a time.
@@ -140,6 +170,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 - The classifier is only told apart from your own approvals while the session shows auto mode.
 - Background shells and schedules are rebuilt from tool calls and refreshed each time Claude stops; there is no live list.
 - Bitbucket has no official CLI: the open PR shows for public repositories only.
+- `az` is run by name with no shell. Where it is installed only as a `.cmd` script (Windows), it may not start, and the Azure DevOps PR line stays hidden.
 - A repository's theme is tied to its folder: a moved or renamed folder, or a second clone, starts from the global theme.
 
 ## Performance
