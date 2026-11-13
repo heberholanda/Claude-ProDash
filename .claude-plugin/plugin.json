@@ -1,13 +1,27 @@
 {
   "name": "prodash",
   "displayName": "Pro Dash",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Pro Dash: system status, agents, MCP servers, context breakdown, git, permissions, project board and themes in one pane",
-  "author": { "name": "Heber Holanda" },
+  "author": {
+    "name": "Heber Holanda"
+  },
   "license": "MIT",
   "homepage": "https://github.com/heberholanda/Claude-ProDash",
   "repository": "https://github.com/heberholanda/Claude-ProDash",
-  "keywords": ["dashboard", "monitoring", "subagents", "context", "mcp", "git", "permissions", "themes"],
+  "documentationUrl": "https://github.com/heberholanda/Claude-ProDash#readme",
+  "supportUrl": "https://github.com/heberholanda/Claude-ProDash/issues",
+  "privacyPolicyUrl": "https://github.com/heberholanda/Claude-ProDash#what-the-mod-runs-sends-and-hooks",
+  "keywords": [
+    "dashboard",
+    "monitoring",
+    "subagents",
+    "context",
+    "mcp",
+    "git",
+    "permissions",
+    "themes"
+  ],
   "icon": ".claude-plugin/icon.png",
   "types": "./types/index.d.ts"
 }
