@@ -30,6 +30,7 @@ export type GitFile = { xy: string; path: string }
 export type Git = {
   isRepo: boolean
   repo?: string
+  host?: string // GITHUB, GITLAB, BITBUCKET, AZURE DEVOPS, or the remote's hostname
   branch?: string
   upstream?: string
   ahead: number

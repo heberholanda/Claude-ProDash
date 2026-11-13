@@ -137,7 +137,86 @@ test('action bar: a3 opens the board, back returns to the forks', async ($, on) 
   }
 })
 
-import { parseStatus } from '../hooks/register'
+import { parseStatus, parseRemote, prFor } from '../hooks/register'
+
+test('origin URL maps to provider and repo path', () => {
+  expect(parseRemote('git@github.com:me/repo.git')).toEqual({ host: 'GITHUB', repo: 'me/repo' })
+  expect(parseRemote('https://github.com/me/repo')).toEqual({ host: 'GITHUB', repo: 'me/repo' })
+  expect(parseRemote('https://gitlab.com/grp/sub/proj.git')).toEqual({ host: 'GITLAB', repo: 'grp/sub/proj' })
+  expect(parseRemote('ssh://git@gitlab.acme.io:2222/grp/proj.git')).toEqual({ host: 'GITLAB', repo: 'grp/proj' })
+  expect(parseRemote('git@bitbucket.org:ws/repo.git')).toEqual({ host: 'BITBUCKET', repo: 'ws/repo' })
+  expect(parseRemote('https://org@dev.azure.com/org/proj/_git/repo')).toEqual({ host: 'AZURE DEVOPS', repo: 'org/proj/repo' })
+  expect(parseRemote('git@ssh.dev.azure.com:v3/org/proj/repo')).toEqual({ host: 'AZURE DEVOPS', repo: 'org/proj/repo' })
+  expect(parseRemote('https://codeberg.org/me/repo.git')).toEqual({ host: 'CODEBERG.ORG', repo: 'me/repo' })
+})
+
+// Fake process runner: first argv word(s) -> stdout; anything unlisted fails like a missing CLI.
+const fakeRun = (out: Record<string, string>) => {
+  const calls: string[][] = []
+  const run = async (argv: string[]) => {
+    calls.push(argv)
+    const key = Object.keys(out).find(k => argv.join(' ').startsWith(k))
+    return key === undefined ? undefined : out[key]
+  }
+  return { run, calls }
+}
+
+test('GitHub PR comes from gh pr view', async () => {
+  const { run, calls } = fakeRun({ 'gh pr view': '#1 MERGED interactive pr list' })
+  expect(await prFor(run, { host: 'GITHUB', repo: 'cli/cli' })).toBe('#1 MERGED interactive pr list')
+  expect(calls[0]).toEqual(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
+})
+
+test('GitLab MR comes from glab mr view JSON', async () => {
+  const { run, calls } = fakeRun({ 'glab mr view': JSON.stringify({ iid: 42, state: 'opened', title: 'Fix login', id: 9001 }) })
+  expect(await prFor(run, { host: 'GITLAB', repo: 'grp/proj' })).toBe('!42 OPENED Fix login')
+  expect(calls[0]).toEqual(['glab', 'mr', 'view', '-F', 'json'])
+})
+
+test('Azure DevOps PR comes from az repos pr list for the current branch', async () => {
+  const { run, calls } = fakeRun({ 'git branch': 'feature/x', 'az repos': '7\tactive\tAdd\tlogin' })
+  expect(await prFor(run, { host: 'AZURE DEVOPS', repo: 'org/proj/repo' })).toBe('#7 ACTIVE Add login')
+  expect(calls[1]).toEqual(['az', 'repos', 'pr', 'list', '--source-branch', 'feature/x', '--status', 'active', '--query', '[0].[pullRequestId,status,title]', '-o', 'tsv'])
+})
+
+test('Azure DevOps falls back to cmd /c az (az.cmd on Windows); empty output means no PR', async () => {
+  const { run, calls } = fakeRun({ 'git branch': 'main', 'cmd /c az': '3\tactive\tFix' })
+  expect(await prFor(run, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBe('#3 ACTIVE Fix')
+  expect(calls.map(c => c[0])).toEqual(['git', 'az', 'cmd'])
+  expect(await prFor(fakeRun({ 'git branch': 'main', 'az repos': '' }).run, { host: 'AZURE DEVOPS', repo: 'o/p/r' })).toBeUndefined()
+})
+
+test('Bitbucket PR comes from the public REST API, filtered by branch and OPEN', async () => {
+  const body = '{"values": [{"id": 582, "title": "Update express", "state": "OPEN"}]}'
+  const { run, calls } = fakeRun({ 'git branch': 'renovate/express-4.x', curl: body })
+  expect(await prFor(run, { host: 'BITBUCKET', repo: 'ws/repo' })).toBe('#582 OPEN Update express')
+  const url = new URL(calls[1]![2]!)
+  expect(url.pathname).toBe('/2.0/repositories/ws/repo/pullrequests')
+  expect(url.searchParams.get('q')).toBe('source.branch.name="renovate/express-4.x" AND state="OPEN"')
+  expect(url.searchParams.get('fields')).toBe('values.id,values.state,values.title')
+  expect(await prFor(fakeRun({ 'git branch': 'main', curl: '{"values": []}' }).run, { host: 'BITBUCKET', repo: 'ws/repo' })).toBeUndefined()
+})
+
+test('no PR line when the CLI is missing, the branch is detached, or the host is unknown', async () => {
+  for (const host of ['GITHUB', 'GITLAB', 'AZURE DEVOPS', 'BITBUCKET']) expect(await prFor(fakeRun({ 'git branch': 'main' }).run, { host, repo: 'a/b' })).toBeFalsy()
+  expect(await prFor(fakeRun({ 'git branch': '', curl: '{}' }).run, { host: 'BITBUCKET', repo: 'a/b' })).toBeUndefined()
+  const { run, calls } = fakeRun({ 'git branch': 'main' })
+  expect(await prFor(run, { host: 'CODEBERG.ORG', repo: 'me/repo' })).toBeUndefined()
+  expect(calls.every(c => c[0] === 'git')).toBe(true)
+})
+
+test('GitLab title and MR label render in the git section', async ($, on) => {
+  engine(on)
+  on('state.get', (_, e, next) =>
+    e.key === 'git'
+      ? { value: { value: { shape: 'git-1', value: { isRepo: true, host: 'GITLAB', repo: 'grp/sub/proj', branch: 'main', pr: '!42 OPENED Fix login', ahead: 0, behind: 0, stash: 0, files: [] } }, version: 1 } }
+      : next(e))
+  const ui = await $.ui.mount({ ...pane(80), surface: SURFACES[0]! })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.some(t => t.includes('GITLAB · grp/sub/proj')), texts.join('\n')).toBe(true)
+  expect(texts.some(t => t.startsWith('MR ') && t.includes('!42 OPENED Fix login'))).toBe(true)
+  await ui.unmount()
+})
 
 test('git porcelain v2 is parsed', () => {
   const g = parseStatus([
@@ -157,7 +236,7 @@ test('GITHUB section sits above ACTIVE FORKS and lists pending files', async ($,
   engine(on)
   on('state.get', (_, e, next) =>
     e.key === 'git'
-      ? { value: { value: { shape: 'git-1', value: { isRepo: true, repo: 'me/repo', branch: 'main', ahead: 1, behind: 0, stash: 0, files: [{ xy: '.M', path: 'src/c.ts' }] } }, version: 1 } }
+      ? { value: { value: { shape: 'git-1', value: { isRepo: true, host: 'GITHUB', repo: 'me/repo', branch: 'main', ahead: 1, behind: 0, stash: 0, files: [{ xy: '.M', path: 'src/c.ts' }] } }, version: 1 } }
       : next(e))
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...pane(80), surface })

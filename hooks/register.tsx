@@ -97,6 +97,40 @@ export function parseStatus(out: string): Git {
   }
   return g
 }
+// origin URL (https, ssh://, scp-style) -> provider label + repo path (GitLab subgroups kept, Azure "/_git/" dropped).
+export function parseRemote(url: string): { host: string; repo: string } {
+  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/i.exec(url.trim())
+  if (!m) return { host: 'GIT', repo: url.trim() }
+  const h = m[1]!
+  const host = /github/i.test(h) ? 'GITHUB' : /gitlab/i.test(h) ? 'GITLAB' : /bitbucket/i.test(h) ? 'BITBUCKET'
+    : /dev\.azure\.com|visualstudio\.com/i.test(h) ? 'AZURE DEVOPS' : h.toUpperCase()
+  return { host, repo: m[2]!.replace(/^v3\//, '').replace('/_git/', '/') }
+}
+// Open PR/MR for the current branch through the provider's own CLI; silently none when it's missing or signed out.
+export async function prFor(run: (argv: string[]) => Promise<string | undefined>, { host, repo }: { host: string; repo: string }): Promise<string | undefined> {
+  if (host === 'GITHUB') return run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}'])
+  if (host === 'GITLAB') {
+    const mr = JSON.parse((await run(['glab', 'mr', 'view', '-F', 'json'])) || 'null')
+    return mr && `!${mr.iid} ${String(mr.state).toUpperCase()} ${mr.title}`
+  }
+  const branch = await run(['git', 'branch', '--show-current'])
+  if (!branch) return undefined
+  if (host === 'AZURE DEVOPS') {
+    const args = ['repos', 'pr', 'list', '--source-branch', branch, '--status', 'active', '--query', '[0].[pullRequestId,status,title]', '-o', 'tsv']
+    // az is az.cmd on Windows, which can't be spawned without a shell.
+    const out = (await run(['az', ...args])) ?? (await run(['cmd', '/c', 'az', ...args]))
+    const [id, state, ...title] = (out ?? '').split('\t')
+    return id ? `#${id} ${state?.toUpperCase()} ${title.join(' ')}` : undefined
+  }
+  if (host === 'BITBUCKET') {
+    // shortcut: no official CLI, so the unauthenticated REST API covers public repos only; add a token when private ones are needed.
+    const q = encodeURIComponent(`source.branch.name="${branch}" AND state="OPEN"`)
+    const res = JSON.parse((await run(['curl', '-sf', `https://api.bitbucket.org/2.0/repositories/${repo}/pullrequests?q=${q}&fields=values.id,values.state,values.title`])) || 'null')
+    const p = res?.values?.[0]
+    return p && `#${p.id} ${p.state} ${p.title}`
+  }
+  return undefined
+}
 const fileColor = (xy: string) =>
   xy === '??' ? '#ff875f' : xy === 'UU' ? '#ff5f5f' : xy[0] !== '.' ? '#5fd75f' : '#ffd75f'
 
@@ -506,6 +540,7 @@ export const register: Register = on => {
       $.process.run(argv, { cwd, timeoutMs: 8000 }).then(r => (r.exitCode === 0 ? r.stdout.trim() : undefined), () => undefined)
     let pr: string | undefined
     let repo: string | undefined
+    let host: string | undefined
     let gitBusy = false, gitTick = 0, isRepo = true, lastOid = '', last: string | undefined, lastGit = ''
     const gitSample = async () => {
       if (gitBusy || (!isRepo && gitTick++ % 6)) return
@@ -521,6 +556,7 @@ export const register: Register = on => {
         const g: Git = st === undefined ? { isRepo: false, ahead: 0, behind: 0, stash: 0, files: [] } : parseStatus(st)
         g.last = last || undefined
         g.repo = repo
+        g.host = host
         g.pr = pr
         const json = JSON.stringify(g)
         if (json !== lastGit) {
@@ -533,9 +569,10 @@ export const register: Register = on => {
     }
     const prSample = async () => {
       const remote = isRepo ? await run(['git', 'remote', 'get-url', 'origin']) : undefined
-      repo = remote?.replace(/\.git$/, '').replace(/^.*[:/]([^/:]+\/[^/]+)$/, '$1')
-      const out = repo ? await run(['gh', 'pr', 'view', '--json', 'number,state,title', '--template', '#{{.number}} {{.state}} {{.title}}']) : undefined
-      pr = out || undefined
+      const r = remote ? parseRemote(remote) : undefined
+      repo = r?.repo
+      host = r?.host
+      pr = (r && await prFor(run, r).catch(() => undefined)) || undefined
       lastOid = '' // let the next status re-read the last commit (it may say "(5 minutes ago)")
     }
     if ((await read($, requests).catch(() => [1])).length === 0) {
@@ -1135,9 +1172,9 @@ export const register: Register = on => {
       const nStaged = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[0] !== '.').length
       const nMod = g.files.filter(f => f.xy !== '??' && f.xy !== 'UU' && f.xy[1] !== '.').length
       const nNew = g.files.filter(f => f.xy === '??').length
-      const gitBox = box(g.isRepo ? `GITHUB · ${g.repo ?? 'no remote'}` : 'GITHUB', 0, g.isRepo ? <Box flexDirection="column">
+      const gitBox = box(g.isRepo ? `${g.host ?? 'GIT'} · ${g.repo ?? 'no remote'}` : 'GIT', 0, g.isRepo ? <Box flexDirection="column">
         <Text wrap="truncate-end">⎇ <Text color={tc('#5fafff')} bold>{g.branch ?? '?'}</Text>{g.upstream ? ` → ${g.upstream}` : ' (no upstream)'} <Text color={tc('#5fd75f')}>↑{g.ahead}</Text> <Text color={tc('#ff875f')}>↓{g.behind}</Text>{g.stash ? `  stash ${g.stash}` : ''}</Text>
-        {g.pr && <Text wrap="truncate-end">PR <Text color={tc('#af87ff')}>{g.pr}</Text></Text>}
+        {g.pr && <Text wrap="truncate-end">{g.host === 'GITLAB' ? 'MR' : 'PR'} <Text color={tc('#af87ff')}>{g.pr}</Text></Text>}
         <Text wrap="truncate-end" dimColor>{g.last ?? 'no commits'}</Text>
         <Text wrap="truncate-end">PENDING: <Text color={tc('#5fd75f')}>{nStaged} staged</Text> · <Text color={tc('#ffd75f')}>{nMod} modified</Text> · <Text color={tc('#ff875f')}>{nNew} new</Text>{g.files.length === 0 ? ' — clean' : ''}</Text>
         {g.files.slice(0, fileRows).map((f: GitFile) => <Text wrap="truncate-start"><Text color={tc(fileColor(f.xy))}>{f.xy.replace(/\./g, ' ')}</Text> {f.path}</Text>)}

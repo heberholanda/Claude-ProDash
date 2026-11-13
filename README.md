@@ -27,8 +27,8 @@ In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add 
 | Feature | Needs |
 | --- | --- |
 | CPU / GPU / RAM in System Status | Windows (PowerShell + CIM). Other systems, or no GPU counters, show `n/a`. |
-| GitHub section | `git` on the PATH and a git repository as the session folder |
-| Pull request in GitHub section | [`gh`](https://cli.github.com/) installed and signed in |
+| Git section | `git` on the PATH and a git repository as the session folder |
+| Open PR / MR in Git section | the provider's CLI installed and signed in: [`gh`](https://cli.github.com/) for GitHub, [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab, [`az`](https://learn.microsoft.com/cli/azure/) with the `azure-devops` extension for Azure DevOps; Bitbucket uses `curl` and the public API (public repositories only). Other hosts show no PR line. |
 | 5h / 7d rate limits | a Claude subscription (the API has no such windows) |
 
 ## Use
@@ -46,7 +46,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme; the open view is the bright one |
 | **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
 | **Context** | % used, tokens used / window, a stacked bar, the 4 heaviest categories and the free space, with tokens and share |
-| **GitHub** | `owner/repo`, branch → upstream, ahead/behind, stash, open PR, last commit, files pending commit (staged / modified / new) with their paths |
+| **Git** (titled by provider: GitHub, GitLab, Bitbucket, Azure DevOps, or the remote's host) | `owner/repo`, branch → upstream, ahead/behind, stash, open PR (MR on GitLab), last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
 ### Action bar views
@@ -95,7 +95,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | MCP servers | the session's tool list every 30 s, `WaitForMcpServers` / `ToolSearch` results, MCP tool calls |
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |
 | CPU / GPU / RAM | one PowerShell CIM query every 15 s |
-| Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and `gh pr view` every 60 s |
+| Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and the open PR/MR every 60 s |
 
 ### Limitations
 
