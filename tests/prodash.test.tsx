@@ -363,6 +363,8 @@ test('tool.check allow by rule counts as a / shell / rule', async ($, on) => {
   const { clock: flushClock } = engine(on)
   on('tool.check', () => ({ decision: 'allow', rule: 'Bash(ls:*)' }))
   const box = gateSpy(on)
+  // the session's 1 s timer writes what the hooks keep in memory
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   await $.tool.call({ tool: 'Read', file_path: '/a.ts' })
   await flushClock.advance(1000)
@@ -384,6 +386,8 @@ test('tool.check deny counts as d; queries are ignored', async ($, on) => {
   const { clock: flushClock } = engine(on)
   on('tool.check', () => ({ decision: 'deny', reason: 'blocked' }))
   const box = gateSpy(on)
+  // the session's 1 s timer writes what the hooks keep in memory
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'WebFetch', url: 'https://x.io' })
   await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
   await flushClock.advance(1000)
@@ -400,6 +404,8 @@ test('an ask is pending, then approved (h) or denied (d) when the call finishes'
   let answer: 'allow' | 'deny' = 'allow'
   on('classic.PermissionRequest', () => ({ decision: answer === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: "The user doesn't want to proceed with this tool use." } }) as never)
   const box = gateSpy(on)
+  // the session's 1 s timer writes what the hooks keep in memory
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'rm x' })
   answer = 'deny'
   // a PermissionRequest deny resolves the call errored ({ isError, text }), not with a `deny` field

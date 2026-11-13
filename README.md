@@ -149,11 +149,13 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 - `gh`, `glab` or `az` ask your git provider for the PR / MR of the current branch.
 - For Bitbucket, Claude Code's own HTTP call (`$.http.fetch`) sends an unauthenticated `GET` to `https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/pullrequests`, which carries the repository name and the branch name.
 
+The Bitbucket URL is the only one the mod builds: its host is always `api.bitbucket.org`, and only the workspace, repository and branch names, read from `git`, change. What comes back is read as JSON for the PR number, state and title; it is never run, and no command the mod runs comes from the network.
+
 Nothing else is sent anywhere. The session's folder (`session.cwd`) is only used to run `git` there, and the conversation (`session.messages`, read once to fill the request timeline) never leaves the pane.
 
 **Hooks.** Every hook only watches and passes its event on unchanged; none decides, rewrites or blocks anything:
-- `tool.check` (a permission check): records the decision your rules, settings or you already made, for the `2` Perms view. It never answers a check.
-- `agent.spawn`: notes that a subagent started, for Active Forks. The agent's description, permission mode and tools are left as they are.
+- `tool.check` (a permission check): records the decision your rules, settings or you already made, for the `2` Perms view, and returns that same decision. It never answers a check. It is the mod's only hook on a permission check.
+- The mod has no hook on `agent.spawn`: subagents are read from `$.agent.list()`, and their description, permission mode and tools are never touched.
 - `classic.Stop`: reads the background shells and scheduled jobs, for the Board.
 - `turn.step`, `tool.call`, `session.compact`, `turn.start`, `turn.complete`, `prompt.submit`: count requests, tool calls, compactions and your prompts (the prompt text stays in the pane).
 - `session.start` starts the timers and loads the saved theme; `session.measure` refreshes the context breakdown.

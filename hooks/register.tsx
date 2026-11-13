@@ -177,7 +177,7 @@ type Patch = { lines: string[] }[]
 // +/- lines of a structured patch
 const patchCount = (patch: Patch | undefined) => {
   let add = 0, del = 0
-  for (const h of patch ?? []) for (const l of h.lines) {
+  for (const hunk of patch ?? []) for (const l of hunk.lines) {
     if (l.startsWith('+')) add++
     else if (l.startsWith('-')) del++
   }
@@ -261,7 +261,6 @@ let gateMem: Gate = EMPTY_GATE
 let reqTools = 0 // tool calls of the open request not yet written
 let reqsDelta = 0 // model requests not yet written
 let livePatch: Partial<Live> = {}
-let flushQueued = false
 
 function log(level: Level, text: string, isSub = false) {
   logBuf.push({ at: Date.now(), level, text: text.slice(0, 300), isSub })
@@ -304,15 +303,6 @@ function flushNow($: EngineInterface, withLogs = false) {
     jobs.push(update($, liveInfo, l => ({ ...l, ...patch, reqs: l.reqs + d })))
   }
   return Promise.all(jobs)
-}
-function markDirty($: EngineInterface, key: Dirty) {
-  dirty.add(key)
-  if (flushQueued) return
-  flushQueued = true
-  $.clock.after(1000, () => {
-    flushQueued = false
-    quiet(flushNow($))
-  })
 }
 
 let lastCtx = ''
@@ -458,7 +448,6 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
-    flushQueued = false // a re-run of register drops the old timer
     await $.command.register({ name: 'prodash', description: 'Open the Pro Dash pane' }).catch(() => undefined)
     await update($, usage, u => ({ ...u, startedAt: u.startedAt || Date.now() })).catch(() => undefined)
     sessionCwd = await $.session.cwd().catch(() => '')
@@ -476,7 +465,7 @@ export const register: Register = on => {
       read($, forks).then(v => { for (const f of v) if (!forkCounts.has(f.id)) forkCounts.set(f.id, { tools: f.tools, lastIn: f.lastIn, out: f.out, act: f.act }) }),
     ]).catch(() => undefined)
 
-    // Agents: every 250ms while a fork is alive (spawn marks one at once), every 1s otherwise.
+    // Agents: every 250ms while a fork is alive, every 1s otherwise; a new fork shows up on the next poll.
     let tick = 0
     const pollAgents = async () => {
       const anyLive = [...forkStatus.values()].some(st => LIVE.includes(st))
@@ -489,6 +478,7 @@ export const register: Register = on => {
       for (const a of list) {
         names.set(a.id, a.description || a.name || a.type)
         const was = forkStatus.get(a.id)
+        if (!was) log('INFO', `${names.get(a.id)}: spawned → fork`)
         if (was && was !== a.status && (a.status === 'failed' || a.status === 'killed'))
           log(a.status === 'failed' ? 'ERROR' : 'WARN', `${names.get(a.id)}: ${a.status}`, true)
         if (was && was !== a.status && a.status === 'completed') log('SUCCESS', `${names.get(a.id)}: completed`, true)
@@ -534,7 +524,7 @@ export const register: Register = on => {
     }
     $.clock.every(1000, () => {
       quiet(pollUsage())
-      if (dirty.size && !flushQueued) quiet(flushNow($)) // e.g. the gate state tool.check leaves in memory
+      if (dirty.size) quiet(flushNow($)) // what hooks left in memory (counters, gate, forks) is written once a second
     })
 
     // System load: Windows via CIM. shortcut: Windows only, add /proc or vm_stat for other OSes.
@@ -545,7 +535,7 @@ export const register: Register = on => {
       // Read-only CIM query, fixed text: CPU load, total/free RAM, and GPU as Task Manager shows it (each engine
       // type's utilization summed, the busiest type wins; -1 when there are no counters). Prints "cpu total free gpu".
       const r = await $.process.run(
-        ['powershell', '-NoProfile', '-NonInteractive', '-Command', `$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$o=Get-CimInstance Win32_OperatingSystem;$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match 'engtype_'}|Group-Object {$_.Name -replace '.*engtype_',''}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"`],
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_OperatingSystem|%{$o=$_;$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match "engtype_"}|Group-Object {$_.Name -replace ".*engtype_",""}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"}'],
         { timeoutMs: 8000 },
       ).catch(() => undefined).finally(() => { sysBusy = false })
       const [c, total, free, gp] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
@@ -651,7 +641,7 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     reqsDelta++
     if (!e.agentId) livePatch = { ...livePatch, model: e.model, ...(e.effort === undefined ? {} : { effort: String(e.effort) }) }
-    markDirty($, 'live')
+    dirty.add('live')
     const it = next(e)
     let step = await it.next()
     while (!step.done) {
@@ -661,7 +651,7 @@ export const register: Register = on => {
         const fc = forkCount(e.agentId)
         fc.lastIn = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
         fc.out += u.output_tokens
-        markDirty($, 'forks')
+        dirty.add('forks')
       }
       yield step.value
       step = await it.next()
@@ -669,11 +659,12 @@ export const register: Register = on => {
     return step.value
   })
 
-  // Observer only: the verdict is whatever passCheck(check) settles to, returned as is. Parameter names are unique in
-  // the file so the directory can read that the event goes on unchanged; the gate state is flushed by the 1 s timer.
+  // Observer only: it reads the verdict and returns passCheck(check) itself, so the decision is always the one the
+  // user's rules, settings or the person made (at tool.check next only reads the verdict and runs nothing).
+  // Parameter names are unique in the file; the gate state is written by the 1 s timer.
   on('tool.check', async (_checkEngine, check, passCheck) => {
+    if (!check.tool_use_id) return passCheck(check) // a plugin's query, not a call
     const r = await passCheck(check)
-    if (!check.tool_use_id) return r // a plugin's query, not a call
     const tool = String(check.tool)
     const kind: GateKind = r.decision === 'allow' ? 'a' : r.decision === 'deny' ? 'd' : 'p'
     const via = r.decision === 'ask'
@@ -702,7 +693,7 @@ export const register: Register = on => {
       rules,
     }
     dirty.add('gate')
-    return r
+    return passCheck(check)
   }) // no .catch: a hook that fails is skipped and the check goes on as the user's rules decide
 
   on('classic.Stop', async ($, e, next) => {
@@ -738,15 +729,6 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e)) // observer: fail open
 
-  // Observer only: the spawn goes on as passSpawn(spawn) settles; nothing about the agent is changed.
-  on('agent.spawn', async (_spawnEngine, spawn, passSpawn) => {
-    const spawned = await passSpawn(spawn)
-    log('INFO', `${String((spawn as { description?: string }).description ?? 'agent')}: spawned → fork`)
-    const id = (spawned as { agentId?: string }).agentId
-    if (id && !forkStatus.has(id)) forkStatus.set(id, 'pending')
-    return spawned
-  }) // no .catch: a hook that fails is skipped and the spawn goes on unchanged
-
   on('tool.call', async ($, e, next) => {
     const raw = e as unknown as Record<string, unknown>
     const tool = String(e.tool)
@@ -755,13 +737,13 @@ export const register: Register = on => {
       quiet(update($, todos, list => [...list.filter(t => t.id), ...(raw.todos as Todo[]).map(t => ({ content: t.content, status: t.status }))]))
     if (!e.agentId) {
       reqTools++
-      markDirty($, 'requests')
+      dirty.add('requests')
     } else {
       const fc = forkCount(e.agentId)
       fc.tools++
       fc.act = forkActivity(tool, raw, fc.task)
       if (/^Task(Create|Update)$/.test(tool)) fc.task = raw.status === 'in_progress' && raw.activeForm ? String(raw.activeForm).slice(0, 120) : raw.status === 'completed' ? undefined : fc.task
-      markDirty($, 'forks')
+      dirty.add('forks')
     }
 
     const t0 = Date.now()
@@ -772,7 +754,7 @@ export const register: Register = on => {
       const ms = Date.now() - t0, failed = denied || (r as { isError?: boolean }).isError === true
       const st = mcpStats.get(srv) ?? { calls: 0, errors: 0, totalMs: 0 }
       mcpStats.set(srv, { calls: st.calls + 1, errors: st.errors + (failed ? 1 : 0), totalMs: st.totalMs + ms, lastAt: Date.now() })
-      markDirty($, 'mcp')
+      dirty.add('mcp')
     }
     if (!denied) void board($, tool, raw, (r as { result?: unknown }).result).catch(() => undefined)
     const id = e.tool_use_id
@@ -784,14 +766,14 @@ export const register: Register = on => {
       const ev = gateMem.events.find(x => x.id === id && x.kind === 'p')
       if (ev) {
         gateMem = settle(gateMem, id, refused ? 'd' : ev.via === 'classifier' ? 'c' : 'h', Date.now())
-        markDirty($, 'gate')
+        dirty.add('gate')
       }
     }
     const isError = !denied && (r as { isError?: boolean }).isError === true
     log(denied ? 'WARN' : isError ? 'ERROR' : 'SUCCESS',
       `${who}: ${tool} → ${denied ? `denied (${r.deny})` : detail(raw)}`, !!e.agentId)
     countTool(tool, denied)
-    markDirty($, 'perms')
+    dirty.add('perms')
     return r
   }).catch(($, e, next) => next(e)) // observer: fail open
 
