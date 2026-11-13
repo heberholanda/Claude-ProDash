@@ -539,7 +539,7 @@ test('TaskCreate then TaskUpdate keep a todo with its id', async ($, on) => {
 test('background shells and monitors are tracked; TaskStop removes one', async ($, on) => {
   engine(on, { Bash: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' }, Monitor: { taskId: 'm1' }, TaskStop: { message: 'stopped' } })
   const box = boardSpy(on)
-  await $.tool.call({ tool: 'Bash', command: 'npm run dev', run_in_background: true, description: 'dev server' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'sleep 600', run_in_background: true, description: 'dev server' } as never)
   expect(box.bg as Bg[]).toContainEqual(expect.objectContaining({ id: 'b1', kind: 'shell', desc: 'dev server', status: 'running' }))
   await $.tool.call({ tool: 'Monitor', command: 'tail -f x', description: 'watch logs' } as never)
   expect((box.bg as Bg[]).find(b => b.id === 'm1')?.kind).toBe('monitor')
