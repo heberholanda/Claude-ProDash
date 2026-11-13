@@ -687,22 +687,22 @@ export const register: Register = on => {
   // Observer only: it returns the verdict passCheck(check) gave, untouched, so the decision is always the one the
   // user's rules, settings or the person made. Parameter names are unique in the file; the 1 s timer writes the gate.
   on('tool.check', async (_checkEngine, check, passCheck) => {
-    const r = await passCheck(check)
-    if (!check.tool_use_id) return r // a plugin's query, not a call
+    const verdict = await passCheck(check)
+    if (!check.tool_use_id) return verdict // a plugin's query, not a call
     const tool = String(check.tool)
-    const kind: GateKind = r.decision === 'allow' ? 'a' : r.decision === 'deny' ? 'd' : 'p'
-    const via = r.decision === 'ask'
-      ? (!r.plugin && modes.includes('auto') ? 'classifier' : 'person')
-      : r.rule ? 'rule' : r.setting ? 'setting' : r.hook ? 'hook' : 'mode'
+    const kind: GateKind = verdict.decision === 'allow' ? 'a' : verdict.decision === 'deny' ? 'd' : 'p'
+    const via = verdict.decision === 'ask'
+      ? (!verdict.plugin && modes.includes('auto') ? 'classifier' : 'person')
+      : verdict.rule ? 'rule' : verdict.setting ? 'setting' : verdict.hook ? 'hook' : 'mode'
     if (kind === 'p') pending.set(check.tool_use_id, Date.now())
     const ev: GateEvent = {
       id: check.tool_use_id, at: Date.now(), tool, cat: toolCat(tool), kind, via,
       detail: detail((check.input ?? {}) as Record<string, unknown>),
-      reason: r.reason?.slice(0, 200), rule: r.rule, agent: check.agentId, isReadOnly: check.isReadOnly === true,
+      reason: verdict.reason?.slice(0, 200), rule: verdict.rule, agent: check.agentId, isReadOnly: check.isReadOnly === true,
     }
     const g = gateMem
-    const rules = r.rule
-      ? [...g.rules.filter(x => x.rule !== r.rule), { rule: r.rule, n: (g.rules.find(x => x.rule === r.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
+    const rules = verdict.rule
+      ? [...g.rules.filter(x => x.rule !== verdict.rule), { rule: verdict.rule, n: (g.rules.find(x => x.rule === verdict.rule)?.n ?? 0) + 1 }].sort((a, b) => b.n - a.n).slice(0, 20)
       : g.rules
     gateMem = {
       ...g,
@@ -717,7 +717,7 @@ export const register: Register = on => {
       rules,
     }
     dirty.add('gate')
-    return r
+    return verdict
   }) // no .catch: a hook that fails is skipped and the check goes on as the user's rules decide
 
   on('classic.Stop', async ($, e, next) => {
