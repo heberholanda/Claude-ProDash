@@ -1,8 +1,22 @@
 # Pro Dash
 
+[![Release](https://img.shields.io/github/v/release/heberholanda/Claude-ProDash)](https://github.com/heberholanda/Claude-ProDash/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
+
 Pro Dash is a dashboard mod for [Claude Code](https://claude.com/claude-code). It keeps one pane beside the chat showing system load, the session's model and limits, MCP servers, the context window breakdown, the git repository and the live subagents (forks). It also has views for permission checks, project progress and color themes.
 
 ![Pro Dash beside a Claude Code session](docs/screenshot.png)
+
+**Highlights**
+
+- **Live system and session status**: CPU, GPU and RAM; model, effort, cost, context window and the 5h / weekly limits with reset time.
+- **Subagents at a glance**: every running fork with its current activity, time and tokens; click one to open its transcript.
+- **Context and MCP breakdown**: what fills the context window, and which MCP servers cost the most tokens.
+- **Git for GitHub, GitLab, Bitbucket and Azure DevOps**: branch, sync state, pending files and the open PR / MR.
+- **Permission audit**: every permission check, who approved it, how long it waited and which rules decided.
+- **Project board**: plan progress, files touched, request timeline, background jobs and schedules.
+- **Themes**: 8 presets and custom colors, per repository or one global theme.
 
 ## Install
 
@@ -22,12 +36,27 @@ claude plugin install prodash --marketplace heberholanda/Claude-ProDash
 
 In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `heberholanda/Claude-ProDash`, then **Add plugin**.
 
+### Update
+
+```
+claude plugin marketplace update claude-prodash
+claude plugin update prodash@claude-prodash
+```
+
+Then run `/reload-plugins` in an open session, or start a new one. What changed in each version is in [Releases](https://github.com/heberholanda/Claude-ProDash/releases).
+
+### Uninstall
+
+```
+claude plugin uninstall prodash@claude-prodash
+```
+
 ### Requirements
 
 | Feature | Needs |
 | --- | --- |
 | CPU / GPU / RAM in System Status | Windows (PowerShell + CIM). Other systems, or no GPU counters, show `n/a`. |
-| Git section | `git` on the PATH and a git repository as the session folder |
+| Git section, per-repository themes | `git` on the PATH and a git repository as the session folder (outside a repo, themes are kept per folder) |
 | Open PR / MR in Git section | the provider's CLI installed and signed in: [`gh`](https://cli.github.com/) for GitHub, [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab, [`az`](https://learn.microsoft.com/cli/azure/) with the `azure-devops` extension for Azure DevOps; Bitbucket uses `curl` and the public API (public repositories only). Other hosts show no PR line. |
 | 5h / 7d rate limits | a Claude subscription (the API has no such windows) |
 
@@ -46,7 +75,7 @@ When it is docked beside the transcript, the pane can take up to 45% of the term
 | **Action Bar** | `1` Forks · `2` Perms · `3` Board · `4` MCP · `5` Context · `6` Theme; the open view is the bright one |
 | **MCP Servers** | connected servers, tool count and schema tokens; the 5 heaviest servers with their tokens (failed / pending ones first, with their status) |
 | **Context** | % used, tokens used / window, a stacked bar, the 4 heaviest categories and the free space, with tokens and share |
-| **Git** (titled by provider: GitHub, GitLab, Bitbucket, Azure DevOps, or the remote's host) | `owner/repo`, branch → upstream, ahead/behind, stash, open PR (MR on GitLab), last commit, files pending commit (staged / modified / new) with their paths |
+| **Git** | titled by the remote's provider (GitHub, GitLab, Bitbucket, Azure DevOps, or the host name): `owner/repo`, branch → upstream, ahead/behind, stash, open PR (MR on GitLab), last commit, files pending commit (staged / modified / new) with their paths |
 | **Active Forks** | `main` and one row per running subagent with its current activity (the task it has in progress, else its latest tool call), elapsed time and tokens; click a row to open that agent's transcript, `main` to come back |
 
 ### Action bar views
@@ -87,7 +116,7 @@ To type in the custom fields, open the pane with `/prodash` so it holds the keyb
 
 ## How it gets its data
 
-The mod only uses the Claude Code plugin API: it reads tool calls, permission checks, model requests, turns and the session's usage as they happen. It sends nothing anywhere.
+The mod only uses the Claude Code plugin API: it reads tool calls, permission checks, model requests, turns and the session's usage as they happen. The only network traffic is the open PR / MR lookup, which goes to your git provider: through its own CLI (`gh`, `glab`, `az`, with your sign-in), or for Bitbucket an unauthenticated request to `api.bitbucket.org` that carries the repository and branch name. Nothing else leaves your machine.
 
 | Data | Source |
 | --- | --- |
@@ -100,6 +129,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | Files, plan, tasks, background, schedules | the results of Edit / Write, ExitPlanMode, TaskCreate / TaskUpdate / TodoWrite, background Bash / Monitor, CronCreate / CronList |
 | CPU / GPU / RAM | one PowerShell CIM query every 15 s |
 | Git | `git status` every 10 s (60 s outside a repo), `git log` when HEAD moves, remote and the open PR/MR every 60 s |
+| Themes | the plugin store: `prodash.theme` (global), `prodash.theme.repo:<repo root>` (one per repository), `prodash.theme.force`; the repo root comes from `git rev-parse --show-toplevel` when the session starts |
 
 ### Limitations
 
@@ -109,6 +139,8 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 - There is no API event for "the person refused this ask": a call that waited on an ask and ends with an error worded as a refusal is counted as denied.
 - The classifier is only told apart from your own approvals while the session shows auto mode.
 - Background shells and schedules are rebuilt from tool calls and refreshed each time Claude stops; there is no live list.
+- Bitbucket has no official CLI: the open PR shows for public repositories only.
+- A repository's theme is tied to its folder: a moved or renamed folder, or a second clone, starts from the global theme.
 
 ## Performance
 
