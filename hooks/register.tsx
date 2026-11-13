@@ -136,6 +136,32 @@ export async function prFor(
   }
   return undefined
 }
+// The CIM query's three CSV tables -> CPU % (average over processors), RAM in KB, and GPU % as Task Manager shows it:
+// each engine type's utilization summed, the busiest type wins, capped at 100; undefined when there are no GPU counters.
+export function parseSys(out: string): { cpu: number; memTotal: number; memFree: number; gpu?: number } | undefined {
+  let header = ''
+  const cpus: number[] = []
+  let memTotal = 0, memFree = 0
+  const byType = new Map<string, number>()
+  for (const line of out.split(/\r?\n/)) {
+    const cells = line.trim().split('","').map(c => c.replace(/^"|"$/g, ''))
+    if (!line.trim()) continue
+    if (cells[0] === 'LoadPercentage' || cells[0] === 'TotalVisibleMemorySize' || cells[0] === 'Name') { header = cells[0]; continue }
+    if (header === 'LoadPercentage') cpus.push(Number(cells[0]))
+    else if (header === 'TotalVisibleMemorySize') { memTotal = Number(cells[0]); memFree = Number(cells[1]) }
+    else if (header === 'Name') {
+      const type = /engtype_(.+)$/.exec(cells[0] ?? '')?.[1]
+      if (type) byType.set(type, (byType.get(type) ?? 0) + (Number(cells[1]) || 0))
+    }
+  }
+  const cpuOk = cpus.filter(n => !Number.isNaN(n))
+  if (!cpuOk.length) return undefined
+  return {
+    cpu: Math.round(cpuOk.reduce((a, b) => a + b, 0) / cpuOk.length),
+    memTotal, memFree,
+    gpu: byType.size ? Math.min(100, Math.max(...byType.values())) : undefined,
+  }
+}
 const fileColor = (xy: string) =>
   xy === '??' ? '#ff875f' : xy === 'UU' ? '#ff5f5f' : xy[0] !== '.' ? '#5fd75f' : '#ffd75f'
 
@@ -532,20 +558,19 @@ export const register: Register = on => {
     const sample = async () => {
       if (sysBusy) return
       sysBusy = true
-      // Read-only CIM query, fixed text: CPU load, total/free RAM, and GPU as Task Manager shows it (each engine
-      // type's utilization summed, the busiest type wins; -1 when there are no counters). Prints "cpu total free gpu".
+      // Read-only CIM query, fixed text, cmdlets only (no variables or script blocks): three CSV tables, read by parseSys.
       const r = await $.process.run(
-        ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_OperatingSystem|%{$o=$_;$c=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;$g=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -EA 0|?{$_.Name -match "engtype_"}|Group-Object {$_.Name -replace ".*engtype_",""}|%{($_.Group|Measure-Object UtilizationPercentage -Sum).Sum}|Measure-Object -Maximum;$gp=if($g.Count){[math]::Min(100,$g.Maximum)}else{-1};"$c $($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $gp"}'],
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Processor | Select-Object LoadPercentage | ConvertTo-Csv -NoTypeInformation; Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory | ConvertTo-Csv -NoTypeInformation; Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue | Select-Object Name,UtilizationPercentage | ConvertTo-Csv -NoTypeInformation'],
         { timeoutMs: 8000 },
       ).catch(() => undefined).finally(() => { sysBusy = false })
-      const [c, total, free, gp] = (r?.stdout.trim().split(/\s+/) ?? []).map(Number)
-      if (c === undefined || Number.isNaN(c)) return
+      const m = parseSys(r?.stdout ?? '')
+      if (!m) return
       await update($, sys, s => ({
-        load: c,
-        gpu: gp === undefined || Number.isNaN(gp) || gp < 0 ? undefined : gp,
-        memTotal: (total ?? 0) / 1048576,
-        memUsed: ((total ?? 0) - (free ?? 0)) / 1048576,
-        hist: push(s.hist, c),
+        load: m.cpu,
+        gpu: m.gpu,
+        memTotal: m.memTotal / 1048576,
+        memUsed: (m.memTotal - m.memFree) / 1048576,
+        hist: push(s.hist, m.cpu),
       }))
     }
     quiet(sample())
@@ -659,12 +684,11 @@ export const register: Register = on => {
     return step.value
   })
 
-  // Observer only: it reads the verdict and returns passCheck(check) itself, so the decision is always the one the
-  // user's rules, settings or the person made (at tool.check next only reads the verdict and runs nothing).
-  // Parameter names are unique in the file; the gate state is written by the 1 s timer.
+  // Observer only: it returns the verdict passCheck(check) gave, untouched, so the decision is always the one the
+  // user's rules, settings or the person made. Parameter names are unique in the file; the 1 s timer writes the gate.
   on('tool.check', async (_checkEngine, check, passCheck) => {
-    if (!check.tool_use_id) return passCheck(check) // a plugin's query, not a call
     const r = await passCheck(check)
+    if (!check.tool_use_id) return r // a plugin's query, not a call
     const tool = String(check.tool)
     const kind: GateKind = r.decision === 'allow' ? 'a' : r.decision === 'deny' ? 'd' : 'p'
     const via = r.decision === 'ask'
@@ -693,7 +717,7 @@ export const register: Register = on => {
       rules,
     }
     dirty.add('gate')
-    return passCheck(check)
+    return r
   }) // no .catch: a hook that fails is skipped and the check goes on as the user's rules decide
 
   on('classic.Stop', async ($, e, next) => {

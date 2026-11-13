@@ -141,7 +141,7 @@ The mod only uses the Claude Code plugin API: it reads tool calls, permission ch
 | `gh` | `pr view --json number,state,title` | the open pull request on GitHub |
 | `glab` | `mr view -F json` | the open merge request on GitLab |
 | `az` | `repos pr list --source-branch <branch> --status active` | the open pull request on Azure DevOps |
-| `powershell` | `-NoProfile -NonInteractive -Command` with one fixed, read-only CIM query (`Win32_Processor`, `Win32_OperatingSystem`, the GPU engine counters), written out in full in `hooks/register.tsx` | CPU, RAM and GPU in System Status (Windows) |
+| `powershell` | `-NoProfile -NonInteractive -Command` with one fixed, read-only text: three `Get-CimInstance … \| Select-Object … \| ConvertTo-Csv` pipelines (`Win32_Processor`, `Win32_OperatingSystem`, the GPU engine counters), with no variables or script blocks | CPU, RAM and GPU in System Status (Windows) |
 
 `gh`, `glab` and `az` run only when the `origin` remote is on that provider, and use the sign-in you already gave them, to talk to that provider's own servers. The mod reads no token, key or password itself.
 

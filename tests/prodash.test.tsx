@@ -986,3 +986,24 @@ test('USE GLOBAL IN THIS REPO drops the repo theme', async ($, on) => {
   expect(await ui.find({ type: 'Button', key: 'th-use-global' })).toBeUndefined()
   await ui.unmount()
 })
+
+// ---- SYSTEM STATUS ----
+import { parseSys } from '../hooks/register'
+
+test('the CIM CSV tables give CPU (average), RAM and the busiest GPU engine type', () => {
+  const out = [
+    '"LoadPercentage"', '"20"', '"30"',
+    '"TotalVisibleMemorySize","FreePhysicalMemory"', '"66963252","33132216"',
+    '"Name","UtilizationPercentage"',
+    '"pid_1_luid_0x0_phys_0_eng_0_engtype_3D","40"',
+    '"pid_2_luid_0x0_phys_0_eng_0_engtype_3D","35"',
+    '"pid_1_luid_0x0_phys_0_eng_3_engtype_Copy","5"',
+  ].join('\r\n')
+  expect(parseSys(out)).toEqual({ cpu: 25, memTotal: 66963252, memFree: 33132216, gpu: 75 })
+})
+
+test('no GPU counters leave gpu unset; a sum over 100 is capped; no CPU row means no reading', () => {
+  expect(parseSys('"LoadPercentage"\n"7"\n"TotalVisibleMemorySize","FreePhysicalMemory"\n"100","40"')?.gpu).toBeUndefined()
+  expect(parseSys('"LoadPercentage"\n"7"\n"Name","UtilizationPercentage"\n"a_engtype_3D","80"\n"b_engtype_3D","70"')?.gpu).toBe(100)
+  expect(parseSys('')).toBeUndefined()
+})
