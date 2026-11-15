@@ -139,7 +139,7 @@ test('action bar: a3 opens the board, back returns to the forks', async ($, on) 
   }
 })
 
-import { parseStatus, parseRemote, prFor } from '../hooks/register'
+import { parseStatus, parseRemote, prFor, mcpAfter, MCP_VERBS } from '../hooks/register'
 
 test('origin URL maps to provider and repo path', () => {
   expect(parseRemote('git@github.com:me/repo.git')).toEqual({ host: 'GITHUB', repo: 'me/repo' })
@@ -658,6 +658,40 @@ test('CONTEXT: top rows and Free space in the box; key 5 shows every row, memory
     await ui.press({ key: 'back' })
     await ui.unmount()
   }
+})
+
+test('MCP view: reconnect runs /mcp reconnect <server> and marks it connected once its tools are back', async ($, on) => {
+  const { list } = engine(on, { ToolSearch: { matches: [], query: 'x', total_deferred_tools: 0, failed_mcp_servers: [{ name: 'gamma', error: 'boom' }] } })
+  list.push(mcpTool('mcp__alpha__a'))
+  const runs: string[] = []
+  on('command.run', (_, e) => {
+    runs.push(`${e.command} ${(e as { args?: string }).args ?? ''}`.trim())
+    if (e.command === 'mcp' && (e as { args?: string }).args === 'reconnect gamma') list.push(mcpTool('mcp__gamma__a'), mcpTool('mcp__gamma__b'))
+    return { text: 'ok' } as never
+  })
+  on('ui.toast', () => ({ value: undefined }) as never)
+  const box = mcpSpy(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'ToolSearch', query: 'x' } as never)
+  expect(srv(box, 'gamma')?.status).toBe('failed')
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  await ui.press({ key: 'a4' })
+  await ui.press({ key: 'mcp-retry' })
+  expect(runs).toEqual(['mcp reconnect gamma'])
+  expect(srv(box, 'gamma')).toMatchObject({ status: 'connected', tools: 2 })
+  expect(srv(box, 'gamma')?.error).toBeUndefined()
+  await ui.press({ key: 'mcp-disable-alpha' })
+  expect(runs[1]).toBe('mcp disable alpha')
+  expect(srv(box, 'alpha')?.status).toBe('disabled')
+  await ui.unmount()
+})
+
+test('mcpAfter: a reconnect with no tools stays failed with the command text; disable keeps the row', () => {
+  const failed = mcpAfter(MCP, 'gamma', 'reconnect', 0, ' Server  down ')
+  expect(failed.find(x => x.name === 'gamma')).toMatchObject({ status: 'failed', error: 'Server down' })
+  expect(mcpAfter(MCP, 'gamma', 'reconnect', 0).find(x => x.name === 'gamma')?.error).toBe('still not connected')
+  expect(mcpAfter(MCP, 'beta', 'disable', 0).find(x => x.name === 'beta')?.status).toBe('disabled')
+  expect(MCP_VERBS.disabled).toEqual(['enable'])
 })
 
 test('MCP SERVERS box shows even with no servers', async ($, on) => {

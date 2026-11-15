@@ -161,6 +161,7 @@ Nothing else is sent anywhere. The session's folder (`session.cwd`) is only used
 - `session.start` starts the timers and loads the saved theme; `session.measure` refreshes the context breakdown.
 - `ui.render` draws only the mod's own pane; on the session-mode indicator it only reads which modes are on (to tell auto mode's classifier apart) and passes it on unchanged.
 - `command.run` answers only its own `/prodash` command, registered with `$.command.register`.
+- In the `4` MCP view, only when you press one: `reconnect`, `enable` or `disable` on a server's row (and `r`, reconnect every failed server) run Claude Code's own `/mcp <verb> <server>` through `$.command.run`, queued until the session is idle, exactly as if you typed it; `m` opens the `/mcp` menu (sign-in and details). Nothing runs on a timer; a server already being reconnected is not asked twice.
 - Clicking a row in Active Forks calls `$.ui.view`, Claude Code's own call to show that agent's transcript; it comes from no other plugin.
 
 ### Limitations

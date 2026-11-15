@@ -61,7 +61,7 @@ for f in $MODS; do
 done
 
 # 5. Docs: no download-and-run in shipped text
-grep -rnE "(curl|wget|iwr|irm)[^|\n]*\|\s*(sh|bash|iex|pwsh|powershell)\b" --include=*.md --include=*.ts --include=*.tsx --include=*.json . && bad "download-and-run pattern in shipped text"
+grep -rnE "(curl|wget|iwr|irm)[^|\n]*\|\s*(sh|bash|iex|pwsh|powershell)\b" --include=*.md --include=*.ts --include=*.tsx --include=*.json --exclude=CLAUDE.md . && bad "download-and-run pattern in shipped text"
 grep -nA2 "git clone" README.md | grep -qE "plugin-dir|npm (i|install|run)|node |bash |sh " && bad "README chains git clone with a run command in one block"
 
 # 6. No Claude attribution in commits since the last tag

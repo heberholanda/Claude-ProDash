@@ -254,6 +254,34 @@ function mcpMark(list: McpServer[], marks: [string, McpStatus, string?][]): McpS
   return out
 }
 
+// /mcp verbs the MCP view offers per server, by its status (pending: none, a run is on its way)
+export type McpVerb = 'reconnect' | 'enable' | 'disable'
+export const MCP_VERBS: Record<McpStatus, McpVerb[]> = {
+  connected: ['reconnect', 'disable'], failed: ['reconnect', 'disable'], 'needs-auth': ['disable'], disabled: ['enable'], pending: [],
+}
+// A server's row once `/mcp <verb>` has run: connected when the session now has its tools.
+export function mcpAfter(list: McpServer[], name: string, verb: McpVerb, tools: number, text?: string): McpServer[] {
+  const status: McpStatus = verb === 'disable' ? 'disabled' : tools ? 'connected' : 'failed'
+  const error = status === 'failed' ? text?.replace(/\s+/g, ' ').trim().slice(0, 120) || 'still not connected' : undefined
+  return mcpMark(list, [[name, status]]).map(x => (x.name === name ? { ...x, tools, error } : x))
+}
+const mcpRunning = new Set<string>()
+// Runs `/mcp <verb> <server>` as if typed (queued until the session is idle), then reads the session's tools again.
+// shortcut: a server seen only through its tools carries the tool-name spelling (claude_ai_X); /mcp may list it as "claude.ai X"
+async function mcpRun($: EngineInterface, verb: McpVerb, name: string) {
+  if (mcpRunning.has(name)) return
+  mcpRunning.add(name)
+  try {
+    await update($, mcp, list => mcpMark(list, [[name, 'pending']]))
+    const r = await $.command.run({ command: 'mcp', args: `${verb} ${name}` }).catch((err: unknown) => ({ text: String(err) }))
+    const tools = ((await $.tool.list().catch(() => [])) ?? []).filter(t => mcpServer(t.name) === name).length
+    await update($, mcp, list => mcpAfter(list, name, verb, tools, r.text))
+    $.ui.toast(`MCP ${name}: ${verb === 'disable' ? 'disabled' : tools ? `connected, ${tools} tools` : 'not connected'}`)
+  } finally {
+    mcpRunning.delete(name)
+  }
+}
+
 // What a tool call is about, in a few words for the console.
 const detail = (input: Record<string, unknown>) => {
   const v = input.command ?? input.file_path ?? input.pattern ?? input.path ?? input.url ?? input.description ?? input.query ?? ''
@@ -1054,6 +1082,7 @@ export const register: Register = on => {
         {back}
       </Box>)
     } else if (m === 'mcp') {
+      const failed = servers.filter(x => x.status === 'failed')
       // every server: status, tools loaded / total, calls, errors, latency, last use, schema tokens and what of them is in context now
       body = box('MCP', 1, <Box flexDirection="column">
         <Text wrap="truncate-end">{mcpSummary}{allTok ? <Text dimColor> · {kTok1(inCtxTok)} in context now, {kTok1(allTok - inCtxTok)} deferred</Text> : ''}</Text>
@@ -1064,11 +1093,15 @@ export const register: Register = on => {
           return (
             <Box key={`mcpd-${x.name}`} justifyContent="space-between">
               <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> <Text bold>{x.name}</Text> <Text dimColor>{x.status === 'connected' ? `${t ? `${t.loaded}/` : ''}${x.tools} tools loaded` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
-              <Box flexShrink={0} marginLeft={1}><Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text><Text bold>{(t ? kTok1(t.tokens) : '—').padStart(7)}</Text></Box>
+              <Box flexShrink={0} marginLeft={1}>{MCP_VERBS[x.status].map(v => <Box key={`mcpv-${x.name}-${v}`} marginRight={1}><Button key={`mcp-${v}-${x.name}`} label={v} plain dimColor onPress={() => mcpRun($, v, x.name)} /></Box>)}<Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text><Text bold>{(t ? kTok1(t.tokens) : '—').padStart(7)}</Text></Box>
             </Box>
           )
         })}
         {servers.length > Math.max(2, room - 3) && <Text dimColor>… +{servers.length - Math.max(2, room - 3)} servers</Text>}
+        <Box flexDirection="row">
+          {failed.length > 0 && <Box marginRight={2}><Button key="mcp-retry" hotkey="r" label={`reconnect ${failed.length} failed`} plain onPress={() => Promise.all(failed.map(x => mcpRun($, 'reconnect', x.name)))} /></Box>}
+          <Button key="mcp-menu" hotkey="m" label="/mcp menu (sign in, details)" plain onPress={() => $.command.run({ command: 'mcp' }).catch(() => undefined)} />
+        </Box>
         {back}
       </Box>)
     } else if (m === 'context') {
