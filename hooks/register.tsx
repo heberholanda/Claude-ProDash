@@ -266,6 +266,13 @@ export function mcpAfter(list: McpServer[], name: string, verb: McpVerb, tools: 
   return mcpMark(list, [[name, status]]).map(x => (x.name === name ? { ...x, tools, error } : x))
 }
 const mcpRunning = new Set<string>()
+// One toast per server per failure, so the person learns the pane can reconnect it; cleared once it connects again.
+const mcpWarned = new Set<string>()
+function mcpWarn($: EngineInterface, failed: string[]) {
+  const fresh = failed.filter(n => !mcpWarned.has(n))
+  for (const n of fresh) mcpWarned.add(n)
+  if (fresh.length) $.ui.toast(`MCP ${fresh.join(', ')} failed · Pro Dash: 4, then r to reconnect`)
+}
 // Runs `/mcp <verb> <server>` as if typed (queued until the session is idle), then reads the session's tools again.
 // shortcut: a server seen only through its tools carries the tool-name spelling (claude_ai_X); /mcp may list it as "claude.ai X"
 async function mcpRun($: EngineInterface, verb: McpVerb, name: string) {
@@ -276,6 +283,7 @@ async function mcpRun($: EngineInterface, verb: McpVerb, name: string) {
     const r = await $.command.run({ command: 'mcp', args: `${verb} ${name}` }).catch((err: unknown) => ({ text: String(err) }))
     const tools = ((await $.tool.list().catch(() => [])) ?? []).filter(t => mcpServer(t.name) === name).length
     await update($, mcp, list => mcpAfter(list, name, verb, tools, r.text))
+    if (tools) mcpWarned.delete(name)
     $.ui.toast(`MCP ${name}: ${verb === 'disable' ? 'disabled' : tools ? `connected, ${tools} tools` : 'not connected'}`)
   } finally {
     mcpRunning.delete(name)
@@ -468,6 +476,7 @@ async function board($: EngineInterface, tool: string, input: Record<string, unk
       ...(r.disabled ?? []).map(n => [n, 'disabled'] as [string, McpStatus]),
     ]
     if (marks.length) await update($, mcp, list => mcpMark(list, marks))
+    mcpWarn($, r.failed ?? [])
   } else if (tool === 'ToolSearch' && (res.pending_mcp_servers || res.failed_mcp_servers)) {
     const pend = (res.pending_mcp_servers ?? []) as string[]
     const fail = (res.failed_mcp_servers ?? []) as { name: string; error?: string; errorCode?: string }[]
@@ -475,6 +484,7 @@ async function board($: EngineInterface, tool: string, input: Record<string, unk
       ...pend.map(n => [n, 'pending'] as [string, McpStatus]),
       ...fail.map(f => [f.name, 'failed', f.error ?? f.errorCode] as [string, McpStatus, string?]),
     ]))
+    mcpWarn($, fail.map(f => f.name))
   } else if (tool === 'CronDelete') {
     await update($, crons, list => list.filter(x => x.id !== input.id))
   } else if (tool === 'CronList' && Array.isArray(res.jobs)) {
@@ -981,7 +991,9 @@ export const register: Register = on => {
           </Box>
         )
       })}
-      {servers.length > MCP_TOP && <Text dimColor>… +{servers.length - MCP_TOP} more · 4 for all</Text>}
+      {nBad
+        ? <Text wrap="truncate-end" color={tc('#ff875f')}>{servers.length > MCP_TOP ? `… +${servers.length - MCP_TOP} more · ` : ''}4, then r: reconnect {nBad} failed</Text>
+        : <Text wrap="truncate-end" dimColor>{servers.length > MCP_TOP ? `… +${servers.length - MCP_TOP} more · ` : ''}4: all · reconnect, enable, disable</Text>}
     </Box>, W - half)
     // the MCP / Context row (TOP + 3 lines and two borders), left out where its own detail view is open
     const hasRow = m !== 'mcp' && m !== 'context'
@@ -1093,7 +1105,7 @@ export const register: Register = on => {
           return (
             <Box key={`mcpd-${x.name}`} justifyContent="space-between">
               <Text wrap="truncate-end"><Text color={tc(c)}>{g}</Text> <Text bold>{x.name}</Text> <Text dimColor>{x.status === 'connected' ? `${t ? `${t.loaded}/` : ''}${x.tools} tools loaded` : x.status}</Text>{x.error ? <Text color={tc('#ff875f')}> — {x.error}</Text> : ''}</Text>
-              <Box flexShrink={0} marginLeft={1}>{MCP_VERBS[x.status].map(v => <Box key={`mcpv-${x.name}-${v}`} marginRight={1}><Button key={`mcp-${v}-${x.name}`} label={v} plain dimColor onPress={() => mcpRun($, v, x.name)} /></Box>)}<Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text><Text bold>{(t ? kTok1(t.tokens) : '—').padStart(7)}</Text></Box>
+              <Box flexShrink={0} marginLeft={1}>{MCP_VERBS[x.status].map(v => <Box key={`mcpv-${x.name}-${v}`} marginRight={1}><Button key={`mcp-${v}-${x.name}`} label={v} plain dimColor={!(x.status === 'failed' && v === 'reconnect')} onPress={() => mcpRun($, v, x.name)} /></Box>)}<Text dimColor>{x.calls} calls · {x.errors} err{x.calls ? ` · avg ${(x.totalMs / x.calls / 1000).toFixed(1)}s` : ''}{x.lastAt ? ` · ${span(now - x.lastAt)} ago` : ''}</Text><Text bold>{(t ? kTok1(t.tokens) : '—').padStart(7)}</Text></Box>
             </Box>
           )
         })}

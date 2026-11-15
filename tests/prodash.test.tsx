@@ -686,6 +686,21 @@ test('MCP view: reconnect runs /mcp reconnect <server> and marks it connected on
   await ui.unmount()
 })
 
+test('a failed server: one toast naming the way to reconnect, and the compact box says 4, then r', async ($, on) => {
+  engine(on, { ToolSearch: { matches: [], query: 'x', total_deferred_tools: 0, failed_mcp_servers: [{ name: 'unity', error: 'down' }] } })
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => { toasts.push(String((e as { text?: unknown }).text ?? JSON.stringify(e))); return { value: undefined } as never })
+  await $.tool.call({ tool: 'ToolSearch', query: 'x' } as never)
+  await $.tool.call({ tool: 'ToolSearch', query: 'y' } as never)
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('unity failed')
+  expect(toasts[0]).toContain('4, then r')
+  const ui = await $.ui.mount({ ...pane(160), surface: 'terminal' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+  expect(texts).toContain('4, then r: reconnect 1 failed')
+  await ui.unmount()
+})
+
 test('mcpAfter: a reconnect with no tools stays failed with the command text; disable keeps the row', () => {
   const failed = mcpAfter(MCP, 'gamma', 'reconnect', 0, ' Server  down ')
   expect(failed.find(x => x.name === 'gamma')).toMatchObject({ status: 'failed', error: 'Server down' })
